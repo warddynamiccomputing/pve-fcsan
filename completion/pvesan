@@ -1,0 +1,5 @@
+# pvesan bash completion (served by PVE::CLIHandler's 'bashcomplete')
+
+# remove ':' from word breaks so WWIDs/WWNs complete as one word
+COMP_WORDBREAKS=${COMP_WORDBREAKS//:}
+complete -o default -C 'pvesan bashcomplete' pvesan

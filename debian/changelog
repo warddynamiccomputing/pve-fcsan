@@ -1,0 +1,88 @@
+pve-fcsan (1.3.0) trixie; urgency=medium
+
+  * New array drivers, each checked against the vendor's own SDK/tooling:
+    - Dell PowerStore (PyPowerStore)
+    - Dell PowerMax / VMAX via Unisphere (PyU4V): host group, storage group
+      and masking view per cluster
+    - NetApp ONTAP (netapp.ontap Ansible collection): FlexVol + LUN per
+      datastore, one FCP igroup per cluster
+    - NetApp E-Series (SANtricity Ansible collection)
+    - Hitachi VSP via Configuration Manager REST (OpenStack Cinder hbsd):
+      host group and LU path per target port
+  * Vendor settings on arrays: system-id, svm, portgroup, srp, slo,
+    target-ports.
+  * Provisioning reads the WWID after mapping where the array only reports
+    it then (Hitachi).
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Tue, 27 Oct 2026 23:00:00 +0000
+
+pve-fcsan (1.2.2) trixie; urgency=medium
+
+  * Pure driver checked against Pure's generated SDK docs (FlashArray API 2.50):
+    - POST /host-groups and /connections send a JSON body (fields optional)
+    - free space from space.total_used (total_physical is deprecated)
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Tue, 27 Oct 2026 21:30:00 +0000
+
+pve-fcsan (1.2.1) trixie; urgency=medium
+
+  * InfiniBox driver checked against the InfiniSDK source:
+    - unmap by LUN number (DELETE clusters/<id>/luns/lun/<n>), found via
+      GET clusters/<id>?fields=luns; already unmapped is not an error
+    - every non-GET request carries approved=true, as InfiniSDK sends it
+    - FC ports are sent as type "fc"
+    - paging also stops on number_of_objects or a short page
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Tue, 27 Oct 2026 21:00:00 +0000
+
+pve-fcsan (1.2.0) trixie; urgency=medium
+
+  * Array drivers for Pure Storage FlashArray (REST 2.x, API token) and
+    INFINIDAT InfiniBox (REST API), next to IBM Spectrum Virtualize.
+  * Shared host / host-cluster registration logic in PVE::SAN::Array::Base.
+  * Per-vendor defaults: API port, naming rules, recommended path policy.
+  * GUI: array type picker adapts port, credentials and hints.
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Tue, 27 Oct 2026 20:00:00 +0000
+
+pve-fcsan (1.1.0) trixie; urgency=medium
+
+  * Array integration (driver: IBM Spectrum Virtualize / FlashSystem REST API):
+    add arrays with pinned TLS fingerprint, register the cluster as a host
+    cluster, provision a datastore end to end (volume, map, rescan, datastore),
+    grow on the array, delete including the array volume, link existing
+    datastores.
+  * GUI: Arrays tab, provisioning dialog, array-aware grow and delete.
+  * CLI: pvesan array ..., pvesan provision, pvesan datastore array-grow.
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Tue, 27 Oct 2026 18:00:00 +0000
+
+pve-fcsan (1.0.3) trixie; urgency=medium
+
+  * pvesan: exit non-zero when a cluster task fails.
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Tue, 27 Oct 2026 16:45:00 +0000
+
+pve-fcsan (1.0.2) trixie; urgency=medium
+
+  * Fix cluster fan-out: the pvesh path and options were swallowed by a
+    'die' list operator, so every cluster-wide task failed. Add regression
+    test t/50-cluster.t.
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Tue, 27 Oct 2026 16:30:00 +0000
+
+pve-fcsan (1.0.1) trixie; urgency=medium
+
+  * Fix sync on fresh nodes (non-existent PVE::Tools::mkdirs).
+  * Move dead-path cleanup to /san/cleanup-paths (RESTHandler path clash).
+  * Show the PCI driver when qla2xxx reports proc_name "(null)".
+  * Treat an all-ones fabric name (link down) as no fabric.
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Tue, 27 Oct 2026 16:00:00 +0000
+
+pve-fcsan (1.0.0) trixie; urgency=medium
+
+  * Initial release: fcsan storage plugin, /nodes/{node}/san API, pvesan CLI,
+    GUI panel, cluster-wide multipath alias/policy management.
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Tue, 27 Oct 2026 12:00:00 +0000

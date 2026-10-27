@@ -1,0 +1,31 @@
+#!/bin/sh
+
+set -e
+
+INTEGRATE=/usr/share/pve-fcsan/pvesan-integrate
+
+reload_services() {
+    for service in pvedaemon pveproxy pvestatd; do
+        if systemctl -q is-active "$service" 2>/dev/null; then
+            systemctl reload-or-restart "$service" || true
+        fi
+    done
+}
+
+case "$1" in
+    configure)
+        if ! "$INTEGRATE" apply; then
+            echo "WARNING: pvesan API/GUI integration failed; the storage plugin and CLI still work." >&2
+            echo "         Fix the reported problem and run '$INTEGRATE apply'." >&2
+        fi
+        reload_services
+        ;;
+    triggered)
+        "$INTEGRATE" apply || echo "WARNING: re-applying pvesan integration failed" >&2
+        reload_services
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

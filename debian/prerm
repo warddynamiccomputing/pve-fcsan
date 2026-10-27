@@ -1,0 +1,19 @@
+#!/bin/sh
+
+set -e
+
+case "$1" in
+    remove|deconfigure)
+        # without the plugin PVE would ignore these storages and guests would fail to start
+        if grep -qs '^fcsan:' /etc/pve/storage.cfg; then
+            echo "ERROR: /etc/pve/storage.cfg still has 'fcsan' storages." >&2
+            echo "       Change them to 'lvm' (see the runbook, 'Uninstall') before removing pve-fcsan." >&2
+            exit 1
+        fi
+        /usr/share/pve-fcsan/pvesan-integrate remove || true
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

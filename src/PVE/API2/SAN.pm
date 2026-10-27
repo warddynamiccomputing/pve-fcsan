@@ -1,0 +1,939 @@
+package PVE::API2::SAN;
+
+# REST API: /nodes/{node}/san
+#
+# Read calls and the node-local steps (rescan, sync, refresh, detach-local,
+# vg-deactivate) run synchronously on the addressed node. Cluster-wide
+# actions fork a worker on the addressed node, which then drives the
+# node-local steps on every node.
+
+use strict;
+use warnings;
+
+use PVE::JSONSchema qw(get_standard_option);
+use PVE::RPCEnvironment;
+use PVE::RESTHandler;
+
+use PVE::SAN::Array;
+use PVE::SAN::Datastore;
+use PVE::SAN::Provision;
+use PVE::SAN::Inventory;
+use PVE::SAN::Multipath;
+use PVE::SAN::Ops;
+use PVE::SAN::Util qw(parse_wwid_list normalize_wwid);
+
+use base qw(PVE::RESTHandler);
+
+my $PERM_AUDIT = ['perm', '/nodes/{node}', ['Sys.Audit']];
+my $PERM_NODE = ['perm', '/nodes/{node}', ['Sys.Modify']];
+my $PERM_CLUSTER = ['and',
+    ['perm', '/', ['Sys.Modify']],
+    ['perm', '/storage', ['Datastore.Allocate']],
+];
+
+my $node_opt = get_standard_option('pve-node');
+my $wwid_opt = {
+    description => "SCSI WWID of the LUN (multipath WWID, e.g. 3600a0980...; 'naa.' form accepted).",
+    type => 'string',
+    pattern => '[0-9A-Za-z][0-9A-Za-z_.:-]{7,127}',
+};
+my $storage_opt = get_standard_option('pve-storage-id');
+my $wwid_list_opt = {
+    description => "Comma separated list of LUN WWIDs.",
+    type => 'string',
+    maxLength => 4096,
+};
+my $nodes_opt = {
+    description => "Comma separated list of cluster nodes.",
+    type => 'string',
+    format => 'pve-node-list',
+    optional => 1,
+};
+
+my $wwid_param = sub {
+    my ($param) = @_;
+    return normalize_wwid($param->{wwid}) // die "invalid WWID '$param->{wwid}'\n";
+};
+
+my $worker = sub {
+    my ($type, $id, $code) = @_;
+    my $rpcenv = PVE::RPCEnvironment::get();
+    return $rpcenv->fork_worker($type, $id, $rpcenv->get_user(), $code);
+};
+
+my $register = sub {
+    my ($def) = @_;
+    $def->{protected} //= 1; # multipathd, LVM and sysfs writes need root
+    $def->{proxyto} //= 'node';
+    __PACKAGE__->register_method($def);
+};
+
+$register->({
+    name => 'index',
+    path => '',
+    method => 'GET',
+    description => "SAN management index.",
+    protected => 0,
+    permissions => { check => $PERM_AUDIT },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => { type => 'array', items => { type => 'object', properties => { name => { type => 'string' } } } },
+    code => sub {
+        return [ map { { name => $_ } } qw(adapters array-probe arrays cleanup-paths datastores devices paths policies remote-ports rescan rescan-all sync) ];
+    },
+});
+
+$register->({
+    name => 'adapters',
+    path => 'adapters',
+    method => 'GET',
+    description => "List FC (and iSCSI) host adapters.",
+    permissions => { check => $PERM_AUDIT },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => {
+        type => 'array',
+        items => {
+            type => 'object',
+            properties => {
+                name => { type => 'string' },
+                transport => { type => 'string' },
+                driver => { type => 'string', optional => 1 },
+                model => { type => 'string', optional => 1 },
+                wwpn => { type => 'string', optional => 1, description => 'Port WWN (FC) or initiator IQN (iSCSI).' },
+                wwnn => { type => 'string', optional => 1 },
+                state => { type => 'string', optional => 1 },
+                speed => { type => 'string', optional => 1 },
+                fabric => { type => 'string', optional => 1 },
+                firmware => { type => 'string', optional => 1 },
+                targets => { type => 'integer', optional => 1 },
+                devices => { type => 'integer', optional => 1 },
+                paths => { type => 'integer', optional => 1 },
+                link_failures => { type => 'integer', optional => 1 },
+            },
+        },
+    },
+    code => sub { return PVE::SAN::Inventory::adapters(); },
+});
+
+$register->({
+    name => 'remote_ports',
+    path => 'remote-ports',
+    method => 'GET',
+    description => "List FC remote ports (array target ports) seen by each adapter.",
+    permissions => { check => $PERM_AUDIT },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => {
+        type => 'array',
+        items => {
+            type => 'object',
+            properties => {
+                adapter => { type => 'string' },
+                adapter_wwpn => { type => 'string', optional => 1 },
+                name => { type => 'string' },
+                wwpn => { type => 'string', optional => 1 },
+                wwnn => { type => 'string', optional => 1 },
+                state => { type => 'string', optional => 1 },
+                roles => { type => 'string', optional => 1 },
+            },
+        },
+    },
+    code => sub { return PVE::SAN::Inventory::remote_ports(); },
+});
+
+$register->({
+    name => 'devices',
+    path => 'devices',
+    method => 'GET',
+    description => "List SAN LUNs (storage devices) with path summary and usage.",
+    permissions => { check => $PERM_AUDIT },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            all => { type => 'boolean', optional => 1, default => 0,
+                description => "Include local disks and array pseudo LUNs." },
+            unused => { type => 'boolean', optional => 1, default => 0,
+                description => "Only LUNs a datastore can be created on." },
+        },
+    },
+    returns => {
+        type => 'array',
+        items => {
+            type => 'object',
+            properties => {
+                wwid => { type => 'string' },
+                name => { type => 'string' },
+                alias => { type => 'string', optional => 1 },
+                vendor => { type => 'string', optional => 1 },
+                model => { type => 'string', optional => 1 },
+                size => { type => 'integer', renderer => 'bytes' },
+                transport => { type => 'string' },
+                lun => { type => 'integer' },
+                status => { type => 'string' },
+                paths_active => { type => 'integer' },
+                paths_total => { type => 'integer' },
+                policy => { type => 'string' },
+                usage => { type => 'string' },
+                claimed => { type => 'boolean' },
+                detached => { type => 'boolean' },
+                resize_pending => { type => 'boolean' },
+                discard => { type => 'boolean', optional => 1 },
+            },
+        },
+    },
+    code => sub {
+        my ($param) = @_;
+        my $res = PVE::SAN::Inventory::devices(all => $param->{all}, unused => $param->{unused});
+        delete $_->{holders} for @$res;
+        return $res;
+    },
+});
+
+$register->({
+    name => 'paths',
+    path => 'paths',
+    method => 'GET',
+    description => "List all SCSI paths of SAN LUNs.",
+    permissions => { check => $PERM_AUDIT },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => {
+        type => 'array',
+        items => {
+            type => 'object',
+            properties => {
+                dev => { type => 'string' },
+                device => { type => 'string' },
+                wwid => { type => 'string' },
+                hctl => { type => 'string' },
+                lun => { type => 'integer' },
+                target_wwpn => { type => 'string', optional => 1 },
+                state => { type => 'string', optional => 1 },
+                dm_state => { type => 'string', optional => 1 },
+                chk_state => { type => 'string', optional => 1 },
+                priority => { type => 'integer', optional => 1 },
+            },
+        },
+    },
+    code => sub { return PVE::SAN::Inventory::paths(); },
+});
+
+$register->({
+    name => 'policies',
+    path => 'policies',
+    method => 'GET',
+    description => "List the available path selection policies.",
+    protected => 0,
+    permissions => { check => $PERM_AUDIT },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => {
+        type => 'array',
+        items => { type => 'object', properties => { policy => { type => 'string' }, description => { type => 'string' } } },
+    },
+    code => sub {
+        my $p = $PVE::SAN::Multipath::POLICIES;
+        return [ map { { policy => $_, description => $p->{$_}->{description} } } sort keys %$p ];
+    },
+});
+
+$register->({
+    name => 'rescan',
+    path => 'rescan',
+    method => 'POST',
+    description => "Rescan SAN adapters on this node for new LUNs, paths and LUN size changes.",
+    permissions => { check => $PERM_NODE },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            lip => { type => 'boolean', optional => 1, default => 0,
+                description => "Issue a FC LIP (fabric re-login) first. Briefly interrupts I/O per port." },
+            resize => { type => 'boolean', optional => 1, default => 1,
+                description => "Re-read the capacity of existing LUNs." },
+        },
+    },
+    returns => { type => 'object', properties => {} },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Ops::rescan(lip => $param->{lip}, resize => $param->{resize});
+    },
+});
+
+$register->({
+    name => 'rescan_all',
+    path => 'rescan-all',
+    method => 'POST',
+    description => "Rescan SAN adapters on all online cluster nodes.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            lip => { type => 'boolean', optional => 1, default => 0, description => "Issue a FC LIP first." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesanrescan', undef, sub { PVE::SAN::Datastore::rescan_all(lip => $param->{lip}) });
+    },
+});
+
+$register->({
+    name => 'sync',
+    path => 'sync',
+    method => 'POST',
+    description => "Apply the cluster-wide SAN configuration (aliases, policies, claimed and detached LUNs) on this node.",
+    permissions => { check => $PERM_NODE },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub { return PVE::SAN::Ops::sync(); },
+});
+
+$register->({
+    name => 'device_cleanup',
+    path => 'cleanup-paths', # not under devices/: RESTHandler can't mix fixed and {wwid} children
+    method => 'POST',
+    description => "Remove dead SCSI paths (e.g. after a LUN was unmapped on the array) on this node.",
+    permissions => { check => $PERM_NODE },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub { return PVE::SAN::Ops::cleanup_dead_paths(); },
+});
+
+$register->({
+    name => 'device_refresh',
+    path => 'devices/{wwid}/refresh',
+    method => 'POST',
+    description => "Re-read the capacity of one LUN on this node and resize its multipath map.",
+    permissions => { check => $PERM_NODE },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, wwid => $wwid_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Ops::refresh_device($wwid_param->($param));
+    },
+});
+
+$register->({
+    name => 'device_detach_local',
+    path => 'devices/{wwid}/detach-local',
+    method => 'POST',
+    description => "Internal step: remove one LUN's map and paths from this node only. Use 'detach' instead.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, wwid => $wwid_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Ops::detach_device($wwid_param->($param));
+    },
+});
+
+$register->({
+    name => 'vg_deactivate',
+    path => 'vg-deactivate',
+    method => 'POST',
+    description => "Internal step: deactivate all volumes of a volume group on this node.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            vgname => { type => 'string', pattern => '[a-zA-Z0-9\.\+\_][a-zA-Z0-9\.\+\_\-]*' },
+        },
+    },
+    returns => { type => 'object', properties => {} },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Ops::deactivate_vg($param->{vgname});
+    },
+});
+
+$register->({
+    name => 'device_claim',
+    path => 'devices/{wwid}/claim',
+    method => 'POST',
+    description => "Add a LUN: enable multipathing for it on every node (optionally with an alias).",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            wwid => $wwid_opt,
+            alias => { type => 'string', optional => 1, pattern => '[A-Za-z][A-Za-z0-9_.+-]{0,63}' },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        my $wwid = $wwid_param->($param);
+        return $worker->('pvesanclaim', $wwid, sub {
+            PVE::SAN::Datastore::device_claim(wwid => $wwid, alias => $param->{alias});
+        });
+    },
+});
+
+$register->({
+    name => 'device_set',
+    path => 'devices/{wwid}',
+    method => 'PUT',
+    description => "Set alias and path selection policy of a LUN cluster-wide.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            wwid => $wwid_opt,
+            alias => { type => 'string', optional => 1, pattern => '[A-Za-z][A-Za-z0-9_.+-]{0,63}' },
+            policy => { type => 'string', optional => 1, enum => PVE::SAN::Multipath::policy_names() },
+            delete => { type => 'string', optional => 1, format => 'pve-configid-list',
+                description => "Settings to reset (alias, policy)." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        my $wwid = $wwid_param->($param);
+        return $worker->('pvesandev', $wwid, sub {
+            PVE::SAN::Datastore::device_set(wwid => $wwid, map { $_ => $param->{$_} } qw(alias policy delete));
+        });
+    },
+});
+
+$register->({
+    name => 'device_detach',
+    path => 'devices/{wwid}/detach',
+    method => 'POST',
+    description => "Detach an unused LUN from all nodes so it can be unmapped on the array safely.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, wwid => $wwid_opt } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        my $wwid = $wwid_param->($param);
+        return $worker->('pvesandetach', $wwid, sub { PVE::SAN::Datastore::device_detach(wwid => $wwid) });
+    },
+});
+
+$register->({
+    name => 'device_attach',
+    path => 'devices/{wwid}/attach',
+    method => 'POST',
+    description => "Attach a previously detached LUN again on all nodes.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, wwid => $wwid_opt } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        my $wwid = $wwid_param->($param);
+        return $worker->('pvesanattach', $wwid, sub { PVE::SAN::Datastore::device_attach(wwid => $wwid) });
+    },
+});
+
+$register->({
+    name => 'datastores',
+    path => 'datastores',
+    method => 'GET',
+    description => "List SAN datastores (fcsan storages and LVM storages on multipath LUNs).",
+    permissions => { check => $PERM_AUDIT },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => {
+        type => 'array',
+        items => {
+            type => 'object',
+            properties => {
+                storage => { type => 'string' },
+                type => { type => 'string' },
+                label => { type => 'string', optional => 1 },
+                vgname => { type => 'string' },
+                size => { type => 'integer', optional => 1, renderer => 'bytes' },
+                used => { type => 'integer', optional => 1, renderer => 'bytes' },
+                free => { type => 'integer', optional => 1, renderer => 'bytes' },
+                enabled => { type => 'boolean' },
+                active => { type => 'boolean' },
+                shared => { type => 'boolean' },
+                nodes => { type => 'string', optional => 1 },
+                devices => { type => 'string' },
+                wwids => { type => 'string' },
+                lvs => { type => 'integer', optional => 1 },
+                discard => { type => 'boolean' },
+            },
+        },
+    },
+    code => sub { return PVE::SAN::Inventory::datastores(); },
+});
+
+$register->({
+    name => 'datastore_create',
+    path => 'datastores',
+    method => 'POST',
+    description => "Create a shared datastore (LVM volume group + 'fcsan' storage) on one or more LUNs.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            storage => $storage_opt,
+            devices => $wwid_list_opt,
+            label => { type => 'string', optional => 1, maxLength => 128, description => "Display name." },
+            vgname => { type => 'string', optional => 1, pattern => '[a-zA-Z0-9\.\+\_][a-zA-Z0-9\.\+\_\-]*',
+                description => "Volume group name (default: san_<storage>)." },
+            content => { type => 'string', optional => 1, format => 'pve-storage-content-list',
+                description => "Allowed content (default: images,rootdir)." },
+            nodes => $nodes_opt,
+            saferemove => { type => 'boolean', optional => 1, description => "Zero volumes when they are removed." },
+            force => { type => 'boolean', optional => 1, default => 0,
+                description => "Wipe existing partition tables or filesystem signatures on the LUNs." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        my $wwids = parse_wwid_list($param->{devices});
+        return $worker->('pvesancreate', $param->{storage}, sub {
+            PVE::SAN::Datastore::create(
+                %$param,
+                devices => $wwids,
+                content => ref($param->{content}) ? join(',', @{$param->{content}}) : $param->{content},
+            );
+        });
+    },
+});
+
+$register->({
+    name => 'datastore_extend',
+    path => 'datastores/{storage}/extend',
+    method => 'POST',
+    description => "Increase datastore capacity: grow into expanded LUNs, or add LUNs as extents.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            storage => $storage_opt,
+            'add-devices' => { %$wwid_list_opt, optional => 1, description => "LUNs to add as new extents." },
+            devices => { %$wwid_list_opt, optional => 1, description => "Only grow these backing LUNs (default: all)." },
+            force => { type => 'boolean', optional => 1, default => 0,
+                description => "Wipe signatures on added LUNs." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        my %p = (storage => $param->{storage}, force => $param->{force});
+        $p{add_devices} = parse_wwid_list($param->{'add-devices'}) if $param->{'add-devices'};
+        $p{devices} = parse_wwid_list($param->{devices}) if $param->{devices};
+        return $worker->('pvesanextend', $param->{storage}, sub { PVE::SAN::Datastore::extend(%p) });
+    },
+});
+
+$register->({
+    name => 'datastore_rename',
+    path => 'datastores/{storage}/rename',
+    method => 'POST',
+    description => "Rename a datastore: change its display label (online), or its storage ID (guests must be stopped).",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            storage => $storage_opt,
+            label => { type => 'string', optional => 1, maxLength => 128 },
+            'new-id' => { %{get_standard_option('pve-storage-id')}, optional => 1,
+                description => "New storage ID. Guest configs are rewritten." },
+            'rename-vg' => { type => 'boolean', optional => 1, default => 0,
+                description => "Also rename the volume group to san_<new-id>." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        die "nothing to do - set 'label' and/or 'new-id'\n"
+            if !defined($param->{label}) && !defined($param->{'new-id'});
+        return $worker->('pvesanrename', $param->{storage}, sub {
+            PVE::SAN::Datastore::rename_datastore(
+                storage => $param->{storage},
+                label => $param->{label},
+                new_id => $param->{'new-id'},
+                rename_vg => $param->{'rename-vg'},
+            );
+        });
+    },
+});
+
+$register->({
+    name => 'datastore_unmount',
+    path => 'datastores/{storage}/unmount',
+    method => 'POST',
+    description => "Unmount a datastore from some nodes (removes them from 'nodes') or from all (disables it).",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => { node => $node_opt, storage => $storage_opt, nodes => $nodes_opt },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesanumount', $param->{storage}, sub {
+            PVE::SAN::Datastore::unmount(storage => $param->{storage}, nodes => $param->{nodes});
+        });
+    },
+});
+
+$register->({
+    name => 'datastore_mount',
+    path => 'datastores/{storage}/mount',
+    method => 'POST',
+    description => "Mount a datastore again (enable it, or add nodes back).",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => { node => $node_opt, storage => $storage_opt, nodes => $nodes_opt },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesanmount', $param->{storage}, sub {
+            PVE::SAN::Datastore::mount(storage => $param->{storage}, nodes => $param->{nodes});
+        });
+    },
+});
+
+$register->({
+    name => 'datastore_reclaim',
+    path => 'datastores/{storage}/reclaim',
+    method => 'POST',
+    description => "Reclaim free space on thin-provisioned LUNs (SCSI UNMAP of unallocated extents).",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            storage => $storage_opt,
+            reserve => { type => 'number', optional => 1, minimum => 0, default => 0,
+                description => "GiB of free space left untouched (stays allocatable during the run)." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesanreclaim', $param->{storage}, sub {
+            PVE::SAN::Datastore::reclaim(storage => $param->{storage}, reserve => $param->{reserve});
+        });
+    },
+});
+
+$register->({
+    name => 'datastore_delete',
+    path => 'datastores/{storage}',
+    method => 'DELETE',
+    description => "Delete a datastore: remove the storage, its volume group and the LVM labels.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            storage => $storage_opt,
+            'destroy-data' => { type => 'boolean', optional => 1, default => 0,
+                description => "Delete remaining (unreferenced) volumes too." },
+            detach => { type => 'boolean', optional => 1, default => 0,
+                description => "Detach the LUNs afterwards so they can be unmapped on the array." },
+            'delete-volume' => { type => 'boolean', optional => 1, default => 0,
+                description => "For array-linked datastores: also unmap and delete the volume(s) on the array." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesandestroy', $param->{storage}, sub {
+            if ($param->{'delete-volume'}) {
+                PVE::SAN::Provision::destroy(
+                    storage => $param->{storage},
+                    destroy_data => $param->{'destroy-data'},
+                );
+            } else {
+                PVE::SAN::Datastore::destroy(
+                    storage => $param->{storage},
+                    destroy_data => $param->{'destroy-data'},
+                    detach => $param->{detach},
+                );
+            }
+        });
+    },
+});
+
+# --- storage arrays ---
+
+my $array_opt = {
+    description => "Array ID.",
+    type => 'string',
+    pattern => '[a-z][a-z0-9_-]{0,31}',
+};
+
+my $array_conn_props = {
+    address => { type => 'string', format => 'address', description => "Management IP or DNS name." },
+    port => { type => 'integer', minimum => 1, maximum => 65535, optional => 1,
+        description => "Management API port (default: 7443 for IBM, 443 for Pure and InfiniBox)." },
+    username => { type => 'string', maxLength => 64, optional => 1,
+        description => "API user (IBM, InfiniBox). Not used for Pure, where the API token identifies the user." },
+    password => { type => 'string', maxLength => 512,
+        description => "API password, or the API token for Pure. Stored in /etc/pve/priv." },
+    fingerprint => { type => 'string', pattern => 'sha256\$[0-9a-fA-F]{64}',
+        description => "Pinned SHA-256 TLS certificate fingerprint (from array-probe)." },
+    hostcluster => { type => 'string', optional => 1, pattern => '[A-Za-z0-9_][A-Za-z0-9_.-]{0,64}',
+        description => "Host cluster (host group on Pure) for this Proxmox cluster (default: the cluster name)." },
+    description => { type => 'string', optional => 1, maxLength => 256 },
+    'system-id' => { type => 'string', optional => 1, pattern => '[A-Za-z0-9_.-]{1,64}',
+        description => "Array system ID: PowerMax Symmetrix ID (required), E-Series storage system ID (default 1), Hitachi storage device ID (default: the only one)." },
+    svm => { type => 'string', optional => 1, pattern => '[A-Za-z0-9_.-]{1,64}',
+        description => "NetApp ONTAP: SVM that owns the LUNs and the igroup (required)." },
+    portgroup => { type => 'string', optional => 1, pattern => '[A-Za-z0-9_-]{1,64}',
+        description => "Dell PowerMax: existing port group of the array FC ports zoned to the cluster (required)." },
+    srp => { type => 'string', optional => 1, pattern => '[A-Za-z0-9_-]{1,64}',
+        description => "Dell PowerMax: storage resource pool for the cluster's storage group (default SRP_1)." },
+    slo => { type => 'string', optional => 1, pattern => '[A-Za-z0-9_-]{1,32}',
+        description => "Dell PowerMax: service level for the cluster's storage group (default: none / Optimized)." },
+    'target-ports' => { type => 'string', optional => 1, pattern => '[A-Za-z0-9-]+(?:,[A-Za-z0-9-]+)*',
+        description => "Hitachi VSP: array FC ports zoned to the cluster, e.g. CL1-A,CL2-A (required)." },
+};
+
+$register->({
+    name => 'array_probe',
+    path => 'array-probe',
+    method => 'POST',
+    description => "Read an array's TLS certificate fingerprint so it can be confirmed and pinned.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            address => $array_conn_props->{address},
+            port => $array_conn_props->{port},
+            type => { type => 'string', enum => PVE::SAN::Array::types(), optional => 1, default => 'ibm-sv',
+                description => "Array type (picks the default port)." },
+        },
+    },
+    returns => { type => 'object', properties => {
+        fingerprint => { type => 'string' }, subject => { type => 'string' }, issuer => { type => 'string' },
+    } },
+    code => sub {
+        my ($param) = @_;
+        my $port = $param->{port} // PVE::SAN::Array::default_port($param->{type} // 'ibm-sv');
+        return PVE::SAN::Array::probe_certificate($param->{address}, $port);
+    },
+});
+
+$register->({
+    name => 'arrays',
+    path => 'arrays',
+    method => 'GET',
+    description => "List configured storage arrays.",
+    permissions => { check => $PERM_AUDIT },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => {
+        type => 'array',
+        items => {
+            type => 'object',
+            properties => {
+                array => { type => 'string' },
+                type => { type => 'string' },
+                address => { type => 'string' },
+                username => { type => 'string' },
+                hostcluster => { type => 'string' },
+                system => { type => 'string', optional => 1 },
+                datastores => { type => 'string', optional => 1 },
+            },
+        },
+    },
+    code => sub { return PVE::SAN::Array::list(); },
+});
+
+$register->({
+    name => 'array_add',
+    path => 'arrays',
+    method => 'POST',
+    description => "Add a storage array. The connection and credentials are tested before saving.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            array => $array_opt,
+            type => { type => 'string', enum => PVE::SAN::Array::types(), default => 'ibm-sv', optional => 1 },
+            %$array_conn_props,
+        },
+    },
+    returns => { type => 'object', properties => {} },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Provision::array_add(%$param, type => $param->{type} // 'ibm-sv');
+    },
+});
+
+$register->({
+    name => 'array_update',
+    path => 'arrays/{array}',
+    method => 'PUT',
+    description => "Change an array's settings or credentials.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            array => $array_opt,
+            (map { $_ => { %{$array_conn_props->{$_}}, optional => 1 } } keys %$array_conn_props),
+            delete => { type => 'string', optional => 1, pattern => '[a-z][a-z0-9-]*(?:,[a-z][a-z0-9-]*)*',
+                description => "Settings to remove (hostcluster, description, vendor settings)." },
+        },
+    },
+    returns => { type => 'null' },
+    code => sub {
+        my ($param) = @_;
+        PVE::SAN::Provision::array_update(%$param);
+        return undef;
+    },
+});
+
+$register->({
+    name => 'array_remove',
+    path => 'arrays/{array}',
+    method => 'DELETE',
+    description => "Remove an array from pvesan (nothing on the array is changed).",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, array => $array_opt } },
+    returns => { type => 'null' },
+    code => sub {
+        my ($param) = @_;
+        PVE::SAN::Provision::array_remove(array => $param->{array});
+        return undef;
+    },
+});
+
+$register->({
+    name => 'array_status',
+    path => 'arrays/{array}/status',
+    method => 'GET',
+    description => "Array system info and how each node is registered (hosts, ports, host cluster).",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, array => $array_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Provision::array_status(array => $param->{array});
+    },
+});
+
+$register->({
+    name => 'array_pools',
+    path => 'arrays/{array}/pools',
+    method => 'GET',
+    description => "List the array's storage pools.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, array => $array_opt } },
+    returns => {
+        type => 'array',
+        items => {
+            type => 'object',
+            properties => {
+                name => { type => 'string' },
+                status => { type => 'string', optional => 1 },
+                capacity => { type => 'integer', optional => 1, renderer => 'bytes' },
+                free => { type => 'integer', optional => 1, renderer => 'bytes' },
+            },
+        },
+    },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Array::driver($param->{array})->pools();
+    },
+});
+
+$register->({
+    name => 'array_register',
+    path => 'arrays/{array}/register-cluster',
+    method => 'POST',
+    description => "Create or update host objects for every node's FC ports and put them in the cluster's host cluster.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, array => $array_opt } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesanregister', $param->{array}, sub {
+            PVE::SAN::Provision::register_cluster(array => $param->{array});
+        });
+    },
+});
+
+$register->({
+    name => 'array_provision',
+    path => 'arrays/{array}/provision',
+    method => 'POST',
+    description => "Create a volume on the array, map it to the cluster, rescan all nodes and create a datastore on it.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            array => $array_opt,
+            storage => $storage_opt,
+            pool => { type => 'string', maxLength => 65, description => "Array pool ('default' on Pure FlashArray)." },
+            size => { type => 'integer', minimum => 1, description => "Size in GiB." },
+            thin => { type => 'boolean', optional => 1, default => 1,
+                description => "Thin-provisioned volume (Pure volumes are always thin)." },
+            volume => { type => 'string', optional => 1, pattern => '[A-Za-z0-9_][A-Za-z0-9_.-]{0,64}',
+                description => "Volume name on the array (default: the storage ID, adapted to the array's naming rules)." },
+            label => { type => 'string', optional => 1, maxLength => 128 },
+            content => { type => 'string', optional => 1, format => 'pve-storage-content-list' },
+            policy => { type => 'string', optional => 1, enum => PVE::SAN::Multipath::policy_names(),
+                description => "Path policy for the new LUN (default: the vendor recommendation - alua for IBM, array-default for Pure and InfiniBox)." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesanprovision', $param->{storage}, sub {
+            PVE::SAN::Provision::provision(%$param, thin => $param->{thin} // 1);
+        });
+    },
+});
+
+$register->({
+    name => 'array_link',
+    path => 'arrays/{array}/link',
+    method => 'POST',
+    description => "Link an existing datastore to the array volumes that back it.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => { node => $node_opt, array => $array_opt, storage => $storage_opt },
+    },
+    returns => { type => 'object', properties => {} },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Provision::link_datastore(array => $param->{array}, storage => $param->{storage});
+    },
+});
+
+$register->({
+    name => 'datastore_array_grow',
+    path => 'datastores/{storage}/array-grow',
+    method => 'POST',
+    description => "Grow an array-linked datastore: expand the array volume, then the datastore.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            storage => $storage_opt,
+            size => { type => 'integer', minimum => 1, description => "New total volume size in GiB." },
+            volume => { type => 'string', optional => 1, description => "Volume (if the datastore has several)." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesanarraygrow', $param->{storage}, sub {
+            PVE::SAN::Provision::grow(storage => $param->{storage}, size => $param->{size}, volume => $param->{volume});
+        });
+    },
+});
+
+1;

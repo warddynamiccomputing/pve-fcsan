@@ -1,0 +1,116 @@
+#!/usr/bin/perl
+
+# Hook pve-fcsan into pve-manager:
+#  - register PVE::API2::SAN as /nodes/{node}/san in PVE/API2/Nodes.pm
+#  - load pvesan.js in the web GUI's index.html.tpl
+#
+# pve-manager has no plugin hooks for either, so both files get one marked
+# line each. A dpkg trigger re-runs 'apply' whenever pve-manager replaces
+# them. Every edit is verified and rolled back if the result does not
+# compile.
+#
+# usage: pvesan-integrate apply|remove|status
+
+use strict;
+use warnings;
+
+use File::Copy qw(copy);
+
+my $NODES_PM = '/usr/share/perl5/PVE/API2/Nodes.pm';
+my $INDEX_TPL = '/usr/share/pve-manager/index.html.tpl';
+my $MARK = 'pvesan-integration';
+
+my $API_LINE = "use PVE::API2::SAN; __PACKAGE__->register_method({ subclass => \"PVE::API2::SAN\", path => 'san' }); # $MARK\n";
+my $JS_LINE = "    <script type=\"text/javascript\" src=\"/pve2/js/pvesan.js?ver=[% version %]\"></script> <!-- $MARK -->\n";
+
+sub slurp {
+    my ($file) = @_;
+    open(my $fh, '<', $file) or die "unable to read $file - $!\n";
+    local $/;
+    my $c = <$fh>;
+    close($fh);
+    return $c;
+}
+
+sub spew {
+    my ($file, $content) = @_;
+    my $tmp = "$file.pvesan-tmp";
+    open(my $fh, '>', $tmp) or die "unable to write $tmp - $!\n";
+    print $fh $content;
+    close($fh) or die "unable to write $tmp - $!\n";
+    my @st = stat($file);
+    chmod($st[2] & 07777, $tmp) if @st;
+    rename($tmp, $file) or die "rename $tmp failed - $!\n";
+}
+
+sub strip_marked {
+    my ($content) = @_;
+    return join('', grep { !/\Q$MARK\E/ } split(/^/, $content));
+}
+
+sub apply_nodes {
+    my $content = slurp($NODES_PM);
+    return "already integrated" if $content =~ /\Q$MARK\E/;
+
+    # register right after the Disks subclass, inside PVE::API2::Nodes::Nodeinfo
+    my $anchor = qr/(__PACKAGE__->register_method\s*\(\s*\{\s*subclass\s*=>\s*["']PVE::API2::Disks["'][^}]*\}\s*\);\n)/s;
+    $content =~ s/$anchor/$1$API_LINE/ or die "anchor (Disks subclass) not found in $NODES_PM\n";
+
+    my $backup = "$NODES_PM.pvesan-backup";
+    copy($NODES_PM, $backup) or die "backup failed - $!\n";
+    spew($NODES_PM, $content);
+
+    my $ok = system('perl', '-c', $NODES_PM) == 0; # prints "syntax OK"
+    if (!$ok) {
+        copy($backup, $NODES_PM);
+        die "$NODES_PM does not compile with the integration line - reverted\n";
+    }
+    unlink($backup);
+    return "integrated";
+}
+
+sub apply_index {
+    my $content = slurp($INDEX_TPL);
+    return "already integrated" if $content =~ /\Q$MARK\E/;
+    $content =~ s/(^.*pvemanagerlib\.js.*\n)/$1$JS_LINE/m
+        or die "pvemanagerlib.js script tag not found in $INDEX_TPL\n";
+    spew($INDEX_TPL, $content);
+    return "integrated";
+}
+
+sub remove_file {
+    my ($file) = @_;
+    return "not present" if ! -f $file;
+    my $content = slurp($file);
+    return "not integrated" if $content !~ /\Q$MARK\E/;
+    spew($file, strip_marked($content));
+    return "removed";
+}
+
+sub status_file {
+    my ($file) = @_;
+    return "missing" if ! -f $file;
+    return slurp($file) =~ /\Q$MARK\E/ ? "integrated" : "NOT integrated";
+}
+
+my $cmd = shift(@ARGV) // 'status';
+
+if ($cmd eq 'apply') {
+    my $failed = 0;
+    for my $step ([$NODES_PM, \&apply_nodes], [$INDEX_TPL, \&apply_index]) {
+        my $res = eval { $step->[1]->() };
+        if ($@) {
+            warn "pvesan-integrate: $@";
+            $failed = 1;
+        } else {
+            print "$step->[0]: $res\n";
+        }
+    }
+    exit($failed);
+} elsif ($cmd eq 'remove') {
+    print "$_: " . remove_file($_) . "\n" for $NODES_PM, $INDEX_TPL;
+} elsif ($cmd eq 'status') {
+    print "$_: " . status_file($_) . "\n" for $NODES_PM, $INDEX_TPL;
+} else {
+    die "usage: $0 apply|remove|status\n";
+}

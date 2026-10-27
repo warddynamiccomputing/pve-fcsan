@@ -1,0 +1,18 @@
+# build output
+/debian/pve-fcsan/
+/debian/.debhelper/
+/debian/files
+/debian/*.substvars
+/debian/*.debhelper*
+/debian/debhelper-build-stamp
+*.deb
+*.buildinfo
+*.changes
+
+# editors / OS
+*.swp
+*~
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

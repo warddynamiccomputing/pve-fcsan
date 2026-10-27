@@ -1,0 +1,24 @@
+Source: pve-fcsan
+Section: admin
+Priority: optional
+Maintainer: pve-fcsan maintainers <maintainers@example.invalid>
+Build-Depends: debhelper-compat (= 13), perl
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: pve-fcsan
+Architecture: all
+Depends: libpve-storage-perl (>= 8.0),
+         lvm2,
+         multipath-tools,
+         pve-manager (>= 8.0),
+         udev,
+         util-linux,
+         ${misc:Depends},
+         ${perl:Depends},
+Description: vCenter-style Fibre Channel SAN management for Proxmox VE
+ Adds a 'fcsan' storage type (shared LVM on multipathed FC/iSCSI LUNs), a
+ REST API under /nodes/{node}/san, the 'pvesan' CLI and a GUI panel
+ (Node > Disks > SAN / Fibre Channel) to list HBAs, LUNs and paths, rescan,
+ set multipath aliases and path policies, and create, grow, rename, mount,
+ unmount, reclaim and delete datastores cluster-wide.

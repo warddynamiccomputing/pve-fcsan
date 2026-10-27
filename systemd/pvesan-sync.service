@@ -1,0 +1,14 @@
+[Unit]
+Description=Apply pvesan SAN configuration (multipath aliases, policies, detached LUNs)
+After=pve-cluster.service multipathd.service
+Wants=multipathd.service
+Requires=pve-cluster.service
+Before=pvestatd.service pve-guests.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/pvesan sync
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

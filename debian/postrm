@@ -1,0 +1,22 @@
+#!/bin/sh
+
+set -e
+
+case "$1" in
+    remove|purge)
+        for service in pvedaemon pveproxy pvestatd; do
+            if systemctl -q is-active "$service" 2>/dev/null; then
+                systemctl reload-or-restart "$service" || true
+            fi
+        done
+        ;;
+esac
+
+if [ "$1" = "purge" ]; then
+    rm -f /etc/multipath/conf.d/pvesan.conf
+    rm -rf /run/pvesan
+fi
+
+#DEBHELPER#
+
+exit 0

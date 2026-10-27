@@ -1,0 +1,119 @@
+package SanFixture;
+
+# Builds a fake sysfs tree for tests: two qla2xxx FC ports, one local AHCI
+# disk, a 4-path LUN with a multipath map, a 2-path LUN without a map (one
+# path offline) and an array access LUN. Only plain directories and files,
+# so it works on any OS.
+
+use strict;
+use warnings;
+
+use File::Path qw(make_path);
+use File::Temp qw(tempdir);
+
+our $LUN_A = '3600a098038303053453f463045727a41';
+our $LUN_B = '36005076801810523100000000000001b';
+
+# same encoding as PVE::SAN::Util::sysfs_path on Windows
+sub enc {
+    my ($path) = @_;
+    $path =~ s/:/%3A/g if $^O eq 'MSWin32';
+    return $path;
+}
+
+sub put {
+    my ($root, $path, $value) = @_;
+    my $full = $root . enc($path);
+    (my $dir = $full) =~ s|/[^/]+$||;
+    make_path($dir);
+    open(my $fh, '>', $full) or die "$full: $!";
+    print $fh "$value\n";
+    close($fh);
+}
+
+sub mkd {
+    my ($root, $path) = @_;
+    make_path($root . enc($path));
+}
+
+sub fc_host {
+    my ($root, $n, $wwpn) = @_;
+    my $fc = "/sys/class/fc_host/host$n";
+    put($root, "$fc/port_name", $wwpn);
+    put($root, "$fc/node_name", '0x20000024ff3d5e10');
+    put($root, "$fc/port_state", 'Online');
+    put($root, "$fc/port_type", 'NPort (fabric via point-to-point)');
+    put($root, "$fc/speed", '16 Gbit');
+    put($root, "$fc/fabric_name", '0x100000051e90a2b1');
+    put($root, "$fc/statistics/link_failure_count", '0x2');
+    put($root, "/sys/class/scsi_host/host$n/proc_name", 'qla2xxx');
+    put($root, "/sys/class/scsi_host/host$n/model_name", 'QLE2692');
+    put($root, "/sys/class/scsi_host/host$n/fw_version", '9.08.02 (d0d5)');
+    for my $r (0, 1) {
+        my $rp = "/sys/class/fc_remote_ports/rport-$n:0-$r";
+        put($root, "$rp/port_name", sprintf('0x2%d%d0d039ea0a3b1c', $n, $r));
+        put($root, "$rp/node_name", '0x2000d039ea0a3b1c');
+        put($root, "$rp/port_state", 'Online');
+        put($root, "$rp/roles", 'FCP Target');
+        put($root, "/sys/class/fc_transport/target$n:0:$r/port_name", sprintf('0x2%d%d0d039ea0a3b1c', $n, $r));
+    }
+}
+
+sub disk {
+    my ($root, $hctl, $dev, %a) = @_;
+    my $d = "/sys/class/scsi_device/$hctl/device";
+    put($root, "$d/type", '0');
+    put($root, "$d/vendor", $a{vendor} // 'NETAPP');
+    put($root, "$d/model", $a{model} // 'LUN C-Mode');
+    put($root, "$d/rev", '9800');
+    put($root, "$d/state", $a{state} // 'running');
+    put($root, "$d/wwid", $a{wwid}) if $a{wwid};
+    mkd($root, "$d/block/$dev");
+    put($root, "/sys/block/$dev/size", $a{sectors} // 2097152);
+    put($root, "/sys/block/$dev/queue/rotational", '0');
+    mkd($root, "/sys/block/$dev/holders");
+    mkd($root, "/sys/block/$dev/holders/$_") for @{$a{holders} // []};
+}
+
+sub dm_map {
+    my ($root, $dm, $name, $wwid, $sectors, $slaves, %a) = @_;
+    put($root, "/sys/block/$dm/dm/uuid", "mpath-$wwid");
+    put($root, "/sys/block/$dm/dm/name", $name);
+    put($root, "/sys/block/$dm/dm/suspended", '0');
+    put($root, "/sys/block/$dm/size", $sectors);
+    put($root, "/sys/block/$dm/queue/discard_max_bytes", $a{discard} // 0);
+    mkd($root, "/sys/block/$dm/slaves/$_") for @$slaves;
+    mkd($root, "/sys/block/$dm/holders");
+    mkd($root, "/sys/block/$dm/holders/$_") for @{$a{holders} // []};
+}
+
+sub build {
+    my $root = tempdir(CLEANUP => 1);
+
+    fc_host($root, 1, '0x21000024ff3d5e10');
+    fc_host($root, 2, '0x21000024ff3d5e11');
+    put($root, '/sys/class/iscsi_host/host3/initiatorname', 'iqn.1993-08.org.debian:01:pve1');
+    put($root, '/sys/class/scsi_host/host3/proc_name', 'iscsi_tcp');
+    mkd($root, '/sys/class/scsi_host/host0');
+    put($root, '/sys/class/scsi_host/host0/proc_name', 'ahci');
+
+    disk($root, '0:0:0:0', 'sda', vendor => 'ATA', model => 'SAMSUNG MZ7L3480', wwid => 't10.ATA SAMSUNG');
+
+    # LUN A: 4 paths (2 ports x 2 targets), multipathed as "ds1", 1 GiB
+    my @a_paths = (['1:0:0:1', 'sdb'], ['1:0:1:1', 'sdc'], ['2:0:0:1', 'sdd'], ['2:0:1:1', 'sde']);
+    for my $p (@a_paths) {
+        disk($root, $p->[0], $p->[1], wwid => 'naa.600a098038303053453f463045727a41', holders => ['dm-0']);
+    }
+    dm_map($root, 'dm-0', 'ds1', $LUN_A, 2097152, [ map { $_->[1] } @a_paths ], discard => 4194304, holders => ['dm-1']);
+
+    # LUN B: 2 paths, not claimed by multipath, one path offline, 2 GiB
+    disk($root, '1:0:0:2', 'sdf', vendor => 'IBM', model => '2145', wwid => 'naa.6005076801810523100000000000001b', sectors => 4194304);
+    disk($root, '2:0:0:2', 'sdg', vendor => 'IBM', model => '2145', wwid => 'naa.6005076801810523100000000000001b', sectors => 4194304, state => 'offline');
+
+    # access LUN
+    disk($root, '1:0:1:31', 'sdh', vendor => 'DELL', model => 'Universal Xport', wwid => 'naa.6d4ae5200000000000000000000000ff', sectors => 40960);
+
+    return $root;
+}
+
+1;
