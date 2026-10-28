@@ -3,6 +3,13 @@
 The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
+## 1.3.1
+- Fail-safe integration: if pve-fcsan fails to load, only its own API and GUI
+  panel are disabled; the rest of the Proxmox VE API and GUI keep working.
+  Upgrading replaces the 1.3.0 line automatically.
+- `pvesan-integrate status` checks that the API module loads and flags an
+  outdated line.
+
 ## 1.3.0
 - New array drivers: Dell PowerStore, Dell PowerMax / VMAX (Unisphere),
   NetApp ONTAP, NetApp E-Series, Hitachi VSP.

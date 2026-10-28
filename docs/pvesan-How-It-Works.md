@@ -1,6 +1,6 @@
 # pve-fcsan: How It Works
 
-Version 1.3.0
+Version 1.3.1
 
 ## Goals and the stack mapping
 
@@ -186,7 +186,7 @@ pmxcfs aborts code holding a lock for more than 60 s, so every slow step (node f
 - Open-volume gate: `vg-deactivate` refuses while any LV is open.
 - Rollback: a failed create removes the VG/PVs it made; a failed provision deletes the new array volume.
 - Typed confirmation for Delete and Detach in the GUI.
-- Integration guard: `pvesan-integrate` runs `perl -c` on the patched `Nodes.pm` and reverts if it fails.
+- Integration guard: the line in `Nodes.pm` loads pve-fcsan inside an `eval`, so a pve-fcsan that fails to load disables only `/nodes/{node}/san` (with a warning in the journal), never the rest of the API. `pvesan-integrate` runs `perl -c` on the patched `Nodes.pm` and reverts if it fails. The GUI override catches its own errors, so a broken `pvesan.js` loses only the SAN panel.
 - Uninstall guard: `prerm` refuses while `fcsan` storages exist.
 
 **Permissions.** API calls are `protected` (handled by pvedaemon as root) and `proxyto => 'node'`. Reads need `Sys.Audit` on the node; node-local changes `Sys.Modify` on the node; anything cluster-wide or array-related `Sys.Modify` on `/` and `Datastore.Allocate` on `/storage`. Those privileges allow root-level storage changes on every node, the same as Proxmox VE's own storage management.
@@ -208,7 +208,7 @@ pmxcfs aborts code holding a lock for more than 60 s, so every slow step (node f
 
 **Layers.** `Util`, `Sysfs`, `Multipath` (parsing/rendering) and `LVM` (parsing) are pure Perl and read sysfs through `PVESAN_SYSFS_ROOT`, so a fixture tree replaces `/sys`. `Inventory`, `Ops`, `Config` and `Cluster` add Proxmox VE and command execution; `Datastore` and `Provision` compose them; `API2::SAN` exposes them; the CLI and GUI sit only on the API.
 
-**Tests** (`make test`, 293 checks):
+**Tests** (`make test`, 322 checks):
 
 | File | Covers |
 | --- | --- |
@@ -218,6 +218,7 @@ pmxcfs aborts code holding a lock for more than 60 s, so every slow step (node f
 | `t/40-lvm.t` | LVM JSON reports |
 | `t/50-cluster.t` | The exact `pvesh` command lines of the fan-out |
 | `t/60…65-*.t` | Every array driver against a fake array that keeps state (`t/lib/FakeArray.pm`): auth, request bodies, registration, full volume lifecycle, error formats |
+| `t/80-integrate.t` | `pvesan-integrate` against a fake pve-manager tree: insertion point, upgrade from an older line, refusal without the anchor, exact removal, and that the patched `Nodes.pm` still loads with a broken pve-fcsan |
 | `t/90-compile.t` | Loads every module; fails on compile warnings. Uses the real Proxmox VE libraries when present, stubs otherwise |
 
 The build also checks that every Proxmox function the code calls exists in the installed libraries, that the REST router accepts all 36 API paths, that `pvesan.js` parses, and that every module is in the package. CI runs the tests on every push.

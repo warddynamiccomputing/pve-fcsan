@@ -11,7 +11,7 @@ With an array driver it goes one step further, like the Pure Storage or
 INFINIDAT vSphere plugins: **one form creates the volume on the array, maps it
 to the cluster, rescans every node and builds the datastore.**
 
-> **Status: beta.** Everything below is implemented and covered by 293
+> **Status: beta.** Everything below is implemented and covered by 322
 > automated tests, and the plugin runs on a 6-node Proxmox VE 9.2 lab with
 > QLogic and Emulex HBAs. **No array driver has yet been exercised against a
 > real array.** Try each new array type with a small test datastore first, and
@@ -102,7 +102,10 @@ pvesan provision fs01 gold01 --pool Pool0 --size 2048
 The storage plugin uses Proxmox's supported custom-plugin directory. The REST
 API and GUI panel need **one marked line each** in two pve-manager files
 (`PVE/API2/Nodes.pm`, `index.html.tpl`), because Proxmox VE has no plugin hook
-for those. The line is checked with `perl -c` and reverted if it doesn't
+for those. The API line loads pve-fcsan inside an `eval`, so if pve-fcsan ever
+fails to load, only its own API and panel are missing (with a warning in the
+pveproxy and pvedaemon journals) and the rest of the Proxmox VE API keeps
+working. The patched file is checked with `perl -c` and reverted if it doesn't
 compile, and a dpkg trigger re-applies it after every pve-manager upgrade.
 Removing the package removes both lines. This is not supported by Proxmox
 Server Solutions; check `pvesan-integrate status` after upgrades.

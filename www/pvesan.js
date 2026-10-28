@@ -1242,24 +1242,31 @@ Ext.define('PVE.san.Panel', {
 // Add the panel to the node's Disks group. PVE.node.Config fills me.items
 // and then calls PVE.panel.Config.initComponent, which builds the menu, so
 // hooking the parent class lets us append before the menu is built.
+// This override runs for every config panel in the GUI, so anything that
+// goes wrong here only drops the SAN panel and never the panel itself.
 Ext.define('PVE.san.NodeConfigHook', {
     override: 'PVE.panel.Config',
 
     initComponent: function() {
 	let me = this;
-	if (me.$className === 'PVE.node.Config' && Ext.isArray(me.items)) {
-	    let caps = Ext.state.Manager.get('GuiCap');
-	    let hasStorageGroup = me.items.some(item => item.itemId === 'storage');
-	    if (caps && caps.nodes['Sys.Audit'] && hasStorageGroup) {
-		me.items.push({
-		    xtype: 'pveSanPanel',
-		    title: gettext('SAN / Fibre Channel'),
-		    itemId: 'pvesan',
-		    iconCls: 'fa fa-sitemap',
-		    groups: ['storage'],
-		    nodename: me.pveSelNode.data.node,
-		});
+	try {
+	    if (me.$className === 'PVE.node.Config' && Ext.isArray(me.items) &&
+		Ext.ClassManager.getByAlias('widget.pveSanPanel')) {
+		let caps = Ext.state.Manager.get('GuiCap');
+		let hasStorageGroup = me.items.some(item => item.itemId === 'storage');
+		if (caps && caps.nodes['Sys.Audit'] && hasStorageGroup) {
+		    me.items.push({
+			xtype: 'pveSanPanel',
+			title: gettext('SAN / Fibre Channel'),
+			itemId: 'pvesan',
+			iconCls: 'fa fa-sitemap',
+			groups: ['storage'],
+			nodename: me.pveSelNode.data.node,
+		    });
+		}
 	    }
+	} catch (err) {
+	    console.error('pve-fcsan: SAN panel not added', err);
 	}
 	me.callParent(arguments);
     },
