@@ -1,3 +1,17 @@
+pve-fcsan (1.3.1) trixie; urgency=medium
+
+  * Fail-safe pve-manager integration: the line in PVE/API2/Nodes.pm now
+    loads PVE::API2::SAN inside an eval, so a pve-fcsan that fails to load
+    disables only /nodes/{node}/san (with a warning in the journal) instead
+    of stopping pveproxy and pvedaemon. 'apply' replaces the 1.3.0 line.
+  * pvesan-integrate status also checks that the API module loads and
+    flags a line from an older pve-fcsan.
+  * GUI: the PVE.panel.Config override catches its own errors, so a broken
+    pvesan.js loses only the SAN panel.
+  * Tests for pvesan-integrate against a fake pve-manager tree.
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Wed, 28 Oct 2026 12:00:00 +0000
+
 pve-fcsan (1.3.0) trixie; urgency=medium
 
   * New array drivers, each checked against the vendor's own SDK/tooling:

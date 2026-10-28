@@ -1,6 +1,6 @@
 # pve-fcsan Runbook
 
-Version 1.3.0
+Version 1.3.1
 
 ## Purpose and scope
 
@@ -92,7 +92,7 @@ make deb
 **Install** on each node, one at a time:
 
 ```bash
-apt install ./pve-fcsan_1.3.0_all.deb
+apt install ./pve-fcsan_1.3.1_all.deb
 /usr/share/pve-fcsan/pvesan-integrate status
 pvesan adapters
 ```
@@ -102,7 +102,7 @@ The status command should report both `Nodes.pm` and `index.html.tpl` as `integr
 Installing does four things:
 
 1. Installs the storage plugin to `/usr/share/perl5/PVE/Storage/Custom/FCSANPlugin.pm`.
-2. Adds one marked line each to `PVE/API2/Nodes.pm` (API) and `index.html.tpl` (GUI). If `Nodes.pm` doesn't compile with the line added, the change is reverted.
+2. Adds one marked line each to `PVE/API2/Nodes.pm` (API) and `index.html.tpl` (GUI). If `Nodes.pm` doesn't compile with the line added, the change is reverted. The API line loads pve-fcsan inside an `eval`: if pve-fcsan ever fails to load, only the SAN API and panel go away, and the rest of the Proxmox VE API keeps working.
 3. Enables `pvesan-sync.service`. At boot it applies the cluster-wide aliases, policies and detached-LUN list before guests start.
 4. Reloads `pvedaemon`, `pveproxy` and `pvestatd`.
 
@@ -112,7 +112,7 @@ Installing does four things:
 /usr/share/pve-fcsan/pvesan-integrate status
 ```
 
-If it says `NOT integrated`, run `/usr/share/pve-fcsan/pvesan-integrate apply` and read the reason it prints. The storage plugin and existing datastores keep working without the integration; only the GUI panel and the `/san` API go away until it is fixed.
+If it says `integrated by an older pve-fcsan`, run `/usr/share/pve-fcsan/pvesan-integrate apply`. If it says `NOT integrated`, run `/usr/share/pve-fcsan/pvesan-integrate apply` and read the reason it prints. If it says `PVE::API2::SAN: FAILS to load`, the error above it names the cause; `journalctl -u pveproxy` shows the same warning. The storage plugin and existing datastores keep working without the integration; only the GUI panel and the `/san` API go away until it is fixed.
 
 **Uninstall.** Package removal is blocked while `fcsan` storages exist, because Proxmox VE would otherwise drop them and guests would fail to start. Convert each one to plain LVM first; the data and the VG stay as they are.
 
