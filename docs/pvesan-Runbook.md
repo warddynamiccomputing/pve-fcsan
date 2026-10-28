@@ -1,6 +1,6 @@
 # pve-fcsan Runbook
 
-Version 1.3.1
+Version 1.4.0
 
 ## Purpose and scope
 
@@ -109,7 +109,7 @@ make deb
 **Install** on each node, one at a time:
 
 ```bash
-apt install ./pve-fcsan_1.3.1_all.deb
+apt install ./pve-fcsan_1.4.0_all.deb
 /usr/share/pve-fcsan/pvesan-integrate status
 pvesan adapters
 ```
@@ -298,6 +298,7 @@ pvesan provision fs01 gold01 --pool Pool0 --size 2048 --thin 1 --label "Gold 01"
 | NetApp ONTAP (AFF / ASA / FAS) | `netapp-ontap` | 443 | Cluster or SVM admin with REST access | `--svm` (required) | FCP igroup | Aggregate | One FlexVol (`/vol/<name>/lun0`) per datastore; names use `_` instead of `-` |
 | NetApp E-Series | `netapp-eseries` | 8443 | Storage admin | `--system-id` (default `1`) | Host group | Pool / DDP | Thick volumes only; names up to 30 characters |
 | Hitachi VSP | `hitachi-vsp` | 443 (embedded) or your Configuration Manager port | Storage Administrator (Provisioning) | `--target-ports` (required, e.g. `CL1-A,CL2-A`); `--system-id` | One host group per target port (host mode LINUX/IRIX) | DP pool | LU path on every target port; WWID known after mapping |
+| Fujitsu ETERNUS DX S5 / AF S3 | `fujitsu-eternus` | 5665 (enable the RESTful API and open the port in the firewall settings) | User with the Admin or StorageAdmin role | — | One FC host per HBA port (`<node>_<n>`) | Thin provisioning pool (TPP) | Firmware V11L40 or later; host affinity enabled on the CA ports; the cluster's hosts must not share a LUN group with other hosts |
 
 **First use with a new array type:** before your first production datastore, provision and delete a 10 GiB test datastore. Every driver's calls were checked against the vendor's own SDK or tooling, but real-array results are still being collected. If a step fails, the task log shows the array's own error code; please report it.
 

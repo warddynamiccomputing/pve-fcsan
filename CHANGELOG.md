@@ -3,6 +3,11 @@
 The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
+## 1.4.0
+- New array driver: Fujitsu ETERNUS DX S5 / AF S3 (`fujitsu-eternus`), using the
+  ETERNUS RESTful API on port 5665 (firmware V11L40 or later).
+- README: array drivers are optional.
+
 ## 1.3.1
 - Fail-safe integration: if pve-fcsan fails to load, only its own API and GUI
   panel are disabled; the rest of the Proxmox VE API and GUI keep working.

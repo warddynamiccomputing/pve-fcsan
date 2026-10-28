@@ -11,7 +11,7 @@ With an array driver it goes one step further, like the Pure Storage or
 INFINIDAT vSphere plugins: **one form creates the volume on the array, maps it
 to the cluster, rescans every node and builds the datastore.**
 
-> **Status: beta.** Everything below is implemented and covered by 322
+> **Status: beta.** Everything below is implemented and covered by 356
 > automated tests, and the plugin runs on a 6-node Proxmox VE 9.2 lab with
 > QLogic and Emulex HBAs. **No array driver has yet been exercised against a
 > real array.** Try each new array type with a small test datastore first, and
@@ -43,11 +43,17 @@ migration, HA and Proxmox VE 9 volume-chain snapshots work as on shared LVM.
 | NetApp ONTAP (AFF / ASA / FAS) | `netapp-ontap` | ONTAP REST |
 | NetApp E-Series | `netapp-eseries` | SANtricity Web Services |
 | Hitachi VSP | `hitachi-vsp` | Configuration Manager REST |
+| Fujitsu ETERNUS DX S5 / AF S3 | `fujitsu-eternus` | ETERNUS RESTful API, port 5665 (firmware V11L40+) |
 
 Every driver's requests were checked against the vendor's own SDK or tooling
 (PyPowerStore, PyU4V, InfiniSDK, Pure's generated SDK, NetApp's Ansible
-collections, OpenStack Cinder's Hitachi driver). Without a driver, any FC or
-iSCSI array works for everything except provisioning.
+collections, OpenStack Cinder's Hitachi driver, Fujitsu's ETERNUS RESTful API
+Reference).
+
+**A driver is optional.** If your storage team creates and maps the LUNs, or
+you do it in the array's own GUI, add no array at all: pvesan discovers the
+LUNs, sets up multipath and builds the datastores the same way, on any FC or
+iSCSI array. Drivers only add the one-step provisioning, grow and delete.
 
 ## Requirements
 
