@@ -58,25 +58,41 @@ iSCSI array works for everything except provisioning.
 
 ## Install
 
-Build the package on any Debian 12/13 machine or Proxmox node:
+Add the apt repository and install on **every** cluster node, one at a time,
+then check the integration:
+
+```bash
+curl -fsSL https://warddynamiccomputing.github.io/pve-fcsan/pve-fcsan.gpg -o /usr/share/keyrings/pve-fcsan.gpg
+cat > /etc/apt/sources.list.d/pve-fcsan.sources <<'EOF'
+Types: deb
+URIs: https://warddynamiccomputing.github.io/pve-fcsan
+Suites: stable
+Components: main
+Signed-By: /usr/share/keyrings/pve-fcsan.gpg
+EOF
+apt update
+apt install pve-fcsan
+/usr/share/pve-fcsan/pvesan-integrate status
+pvesan adapters
+```
+
+Then reload the web GUI (Ctrl+F5) and open **Node → Disks → SAN / Fibre Channel**.
+New versions arrive with `apt update && apt upgrade`, like Proxmox VE's own
+updates.
+
+The repository is signed with the key
+`FBCA 7A62 0928 1FAA 796F  AFD0 ACCA EEE8 1834 4A99`; compare it with
+`gpg --show-keys /usr/share/keyrings/pve-fcsan.gpg`.
+
+Without the repository: download the `.deb` from a
+[GitHub release](../../releases) and run `apt install ./pve-fcsan_*_all.deb`,
+or build it on any Debian 12/13 machine or Proxmox node:
 
 ```bash
 apt install build-essential debhelper
 make test
 make deb
 ```
-
-Install on **every** cluster node, one at a time, and check the integration:
-
-```bash
-apt install ./pve-fcsan_*_all.deb
-/usr/share/pve-fcsan/pvesan-integrate status
-pvesan adapters
-```
-
-Then reload the web GUI (Ctrl+F5) and open **Node → Disks → SAN / Fibre Channel**.
-
-Pre-built packages are attached to each [GitHub release](../../releases).
 
 ## Quick start
 
@@ -123,6 +139,7 @@ Server Solutions; check `pvesan-integrate status` after upgrades.
 | `bin/pvesan-integrate` | API/GUI registration in pve-manager |
 | `systemd/pvesan-sync.service` | applies cluster SAN config at boot |
 | `t/` | tests: fake sysfs tree, fake arrays, compile check |
+| `tools/build-apt-repo.sh` | builds the signed apt repository (run by CI) |
 
 ## License
 

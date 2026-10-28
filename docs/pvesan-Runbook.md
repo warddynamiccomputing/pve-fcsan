@@ -79,7 +79,24 @@ Add the `devices { }` settings from your array vendor's Linux host guide. Don't 
 
 Install the same `pve-fcsan` .deb on every node. A node without it can't read `fcsan` entries in `storage.cfg`.
 
-**Get the package.** Download it from the project's GitHub releases, or build it on any Debian 12/13 machine or Proxmox node:
+**From the apt repository (recommended).** On each node, as root:
+
+```bash
+curl -fsSL https://warddynamiccomputing.github.io/pve-fcsan/pve-fcsan.gpg -o /usr/share/keyrings/pve-fcsan.gpg
+cat > /etc/apt/sources.list.d/pve-fcsan.sources <<'EOF'
+Types: deb
+URIs: https://warddynamiccomputing.github.io/pve-fcsan
+Suites: stable
+Components: main
+Signed-By: /usr/share/keyrings/pve-fcsan.gpg
+EOF
+apt update
+apt install pve-fcsan
+```
+
+After that, `apt upgrade` installs new pve-fcsan versions along with Proxmox VE updates. The repository's signing key has the fingerprint `FBCA 7A62 0928 1FAA 796F  AFD0 ACCA EEE8 1834 4A99`; check it with `gpg --show-keys /usr/share/keyrings/pve-fcsan.gpg`. Then continue with the status check below.
+
+**Or get the package yourself.** Download it from the project's GitHub releases, or build it on any Debian 12/13 machine or Proxmox node:
 
 ```bash
 apt install build-essential debhelper git

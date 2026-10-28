@@ -230,7 +230,7 @@ The build also checks that every Proxmox function the code calls exists in the i
 1. Update `debian/changelog` and `CHANGELOG.md`.
 2. `make test` and `make deb` on a clean Debian 12/13 host (CI does this on every tag).
 3. Run the cluster acceptance checklist below on a lab cluster.
-4. Tag `vX.Y.Z`; CI attaches the `.deb` to the GitHub release.
+4. Tag `vX.Y.Z`; CI attaches the `.deb` to the GitHub release and rebuilds the signed apt repository on GitHub Pages from every release's `.deb` (`tools/build-apt-repo.sh`, key in the `APT_SIGNING_KEY` secret).
 5. Roll out node by node, checking `pvesan-integrate status` after each.
 
 **Cluster acceptance checklist**
