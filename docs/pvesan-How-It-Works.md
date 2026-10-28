@@ -1,6 +1,6 @@
 # pve-fcsan: How It Works
 
-Version 1.3.1
+Version 1.4.0
 
 ## Goals and the stack mapping
 
@@ -42,7 +42,7 @@ flowchart TB
     API --> OPS["Node-local steps · PVE::SAN::Ops<br/>rescan, sync, refresh, cleanup, detach-local, vg-deactivate"]
     API --> DS["Cluster tasks · PVE::SAN::Datastore / Provision<br/>create, extend, rename, mount, delete, reclaim, provision"]
     DS -- "pvesh to every node" --> API
-    DS --> ARR["Array drivers · PVE::SAN::Array::*<br/>IBM, Pure, InfiniBox, Dell, NetApp, Hitachi"]
+    DS --> ARR["Array drivers · PVE::SAN::Array::*<br/>IBM, Pure, InfiniBox, Dell, NetApp, Hitachi, Fujitsu"]
     OPS --> SYS["Sysfs + Inventory"]
     OPS --> MP["Multipath"]
     OPS --> LVM["LVM"]
@@ -165,6 +165,7 @@ Array drivers turn pvesan from a SAN manager into a provisioning tool. The array
 | NetApp ONTAP | `/api/...`, jobs awaited | `netapp.ontap` Ansible modules | One FCP igroup; one FlexVol + LUN per datastore | `3600a0980` + hex(serial) |
 | NetApp E-Series | `/devmgr/v2/storage-systems/<ssid>` | SANtricity Ansible collection | Host group (Linux DM-MP host type) | `wwn` |
 | Hitachi VSP | `/ConfigurationManager/v1/objects/storages/<id>`, session token, jobs awaited | OpenStack Cinder Hitachi driver, Configuration Manager reference | One host group per target port; LU path on each | `naaId` (known after mapping) |
+| Fujitsu ETERNUS DX S5 / AF S3 | `:5665/api/v1/...`, `POST session` → Bearer token, jobs awaited and deleted | ETERNUS RESTful API Reference (P3AG-5492) | One FC host per WWN (the API has no host groups); every volume connected to all of them with one host LUN | `3` + `uid` |
 
 ## Consistency, locking, safety, permissions
 
@@ -208,7 +209,7 @@ pmxcfs aborts code holding a lock for more than 60 s, so every slow step (node f
 
 **Layers.** `Util`, `Sysfs`, `Multipath` (parsing/rendering) and `LVM` (parsing) are pure Perl and read sysfs through `PVESAN_SYSFS_ROOT`, so a fixture tree replaces `/sys`. `Inventory`, `Ops`, `Config` and `Cluster` add Proxmox VE and command execution; `Datastore` and `Provision` compose them; `API2::SAN` exposes them; the CLI and GUI sit only on the API.
 
-**Tests** (`make test`, 322 checks):
+**Tests** (`make test`, 356 checks):
 
 | File | Covers |
 | --- | --- |
@@ -217,7 +218,7 @@ pmxcfs aborts code holding a lock for more than 60 s, so every slow step (node f
 | `t/30-multipath.t` | Path-state parsing, golden multipath config render |
 | `t/40-lvm.t` | LVM JSON reports |
 | `t/50-cluster.t` | The exact `pvesh` command lines of the fan-out |
-| `t/60…65-*.t` | Every array driver against a fake array that keeps state (`t/lib/FakeArray.pm`): auth, request bodies, registration, full volume lifecycle, error formats |
+| `t/60…66-*.t` | Every array driver against a fake array that keeps state (`t/lib/FakeArray.pm`): auth, request bodies, registration, full volume lifecycle, error formats |
 | `t/80-integrate.t` | `pvesan-integrate` against a fake pve-manager tree: insertion point, upgrade from an older line, refusal without the anchor, exact removal, and that the patched `Nodes.pm` still loads with a broken pve-fcsan |
 | `t/90-compile.t` | Loads every module; fails on compile warnings. Uses the real Proxmox VE libraries when present, stubs otherwise |
 

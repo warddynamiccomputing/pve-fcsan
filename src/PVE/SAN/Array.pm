@@ -22,6 +22,7 @@ our $DRIVERS = {
     'netapp-ontap' => 'PVE::SAN::Array::ONTAP',
     'netapp-eseries' => 'PVE::SAN::Array::ESeries',
     'hitachi-vsp' => 'PVE::SAN::Array::Hitachi',
+    'fujitsu-eternus' => 'PVE::SAN::Array::Eternus',
 };
 
 # vendor specific array settings (API name => config/driver key)

@@ -671,7 +671,7 @@ my $array_opt = {
 my $array_conn_props = {
     address => { type => 'string', format => 'address', description => "Management IP or DNS name." },
     port => { type => 'integer', minimum => 1, maximum => 65535, optional => 1,
-        description => "Management API port (default: 7443 for IBM, 443 for Pure and InfiniBox)." },
+        description => "Management API port (default: the array type's API port, e.g. 7443 for IBM, 5665 for Fujitsu ETERNUS, 443 for most others)." },
     username => { type => 'string', maxLength => 64, optional => 1,
         description => "API user (IBM, InfiniBox). Not used for Pure, where the API token identifies the user." },
     password => { type => 'string', maxLength => 512,

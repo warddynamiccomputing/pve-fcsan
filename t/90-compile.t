@@ -27,6 +27,7 @@ my @modules = qw(
     PVE::SAN::Array::ONTAP
     PVE::SAN::Array::ESeries
     PVE::SAN::Array::Hitachi
+    PVE::SAN::Array::Eternus
     PVE::SAN::Provision
     PVE::Storage::Custom::FCSANPlugin
     PVE::API2::SAN

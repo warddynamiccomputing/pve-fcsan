@@ -93,6 +93,14 @@ Ext.define('PVE.san.Utils', {
 	    certHint: gettext('Configuration Manager / SVP: server certificate settings.'),
 	    fields: { 'target-ports': true, 'system-id': false },
 	},
+	'fujitsu-eternus': {
+	    name: 'Fujitsu ETERNUS DX S5 / AF S3 (RESTful API)',
+	    port: 5665,
+	    username: true,
+	    secretLabel: gettext('Password'),
+	    roleHint: gettext('Needs controller firmware V11L40 or later with the RESTful API enabled and port 5665 open in the array firewall settings. Use a user with the Admin or StorageAdmin role. pvesan registers each node HBA port as an FC host and connects every volume to all of them; enable host affinity on the CA ports zoned to the cluster. Pools are thin provisioning pools.'),
+	    certHint: gettext('ETERNUS Web GUI: the RESTful API uses the Web GUI SSL certificate.'),
+	},
     },
 
     optionFields: [
