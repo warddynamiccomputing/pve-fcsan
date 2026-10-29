@@ -40,7 +40,7 @@ flowchart TB
     REST["REST clients / pvesh"] --> API
     API["REST API · PVE::API2::SAN<br/>pvedaemon (root), runs on the addressed node"]
     API --> OPS["Node-local steps · PVE::SAN::Ops<br/>rescan, sync, refresh, cleanup, detach-local, vg-deactivate"]
-    API --> DS["Cluster tasks · PVE::SAN::Datastore / Provision<br/>create, extend, rename, mount, delete, reclaim, provision"]
+    API --> DS["Cluster tasks · PVE::SAN::Datastore / Provision / Snapshot<br/>create, extend, rename, mount, delete, reclaim, provision, snapshots"]
     DS -- "pvesh to every node" --> API
     DS --> ARR["Array drivers · PVE::SAN::Array::*<br/>IBM, Pure, InfiniBox, Dell, NetApp, Hitachi, Fujitsu"]
     OPS --> SYS["Sysfs + Inventory"]
@@ -56,12 +56,13 @@ flowchart TB
 
 | Component | File | Integration point |
 | --- | --- | --- |
-| Storage type `fcsan` | `PVE/Storage/Custom/FCSANPlugin.pm` | Proxmox VE loads every module in `Storage/Custom`. It subclasses `LVMPlugin` and overrides `activate_storage`, `options` and `properties` |
+| Storage type `fcsan` | `PVE/Storage/Custom/FCSANPlugin.pm` | Proxmox VE loads every module in `Storage/Custom`. It subclasses `LVMPlugin` and overrides `activate_storage`, `free_image` (opt-in discard), `options` and `properties` |
 | REST API | `PVE/API2/SAN.pm` | Registered as `/nodes/{node}/san` by one marked line in `PVE/API2/Nodes.pm` |
 | CLI | `PVE/CLI/pvesan.pm`, `/usr/sbin/pvesan` | `PVE::CLIHandler` maps each command onto an API method |
 | GUI | `/usr/share/pve-manager/js/pvesan.js` | One `<script>` line in `index.html.tpl`; an Ext `override` of `PVE.panel.Config` adds the panel to the node's Disks group |
 | Integration | `/usr/share/pve-fcsan/pvesan-integrate` | Run by `postinst`, re-run by a dpkg trigger when pve-manager replaces either file |
 | Boot sync | `pvesan-sync.service` | `pvesan sync` after `pve-cluster` and `multipathd`, before `pvestatd` and guests |
+| Timers | `pvesan-snapshot.timer`, `pvesan-reclaim.timer` | `pvesan snapshot-run` every 15 minutes and `pvesan reclaim-run` weekly on every node; a claim in the cluster DB picks one node per job |
 | Array drivers | `PVE/SAN/Array/*.pm` | Called only by provisioning workflows |
 
 ## Data model
@@ -70,8 +71,8 @@ State lives in three places, each with one owner; each node renders a fourth fro
 
 | Store | Location | Holds | Written by |
 | --- | --- | --- | --- |
-| Storage registry | `/etc/pve/storage.cfg` (pmxcfs) | `fcsan` entry: `vgname`, `shared`, `nodes`, `disable`, `fc-wwids`, `fc-autorescan` | Proxmox VE storage API (`PVE::API2::Storage::Config`) |
-| pvesan cluster DB | `/etc/pve/pvesan/config.json` (pmxcfs) | Per WWID: `alias`, `policy`, `detached`, `datastore`. Per datastore: `label`, linked `array` and `volumes`. Per array: type, address, user, fingerprint, vendor settings | `PVE::SAN::Config::update` under the `pvesan` cfs domain lock |
+| Storage registry | `/etc/pve/storage.cfg` (pmxcfs) | `fcsan` entry: `vgname`, `shared`, `nodes`, `disable`, `fc-wwids`, `fc-autorescan`, `fc-discard` | Proxmox VE storage API (`PVE::API2::Storage::Config`) |
+| pvesan cluster DB | `/etc/pve/pvesan/config.json` (pmxcfs) | Per WWID: `alias`, `policy`, `detached`, `datastore`. Per datastore: `label`, linked `array` and `volumes`; for a snapshot copy `copy_of` and `snapshot`; `snapshot_schedule`, `auto_reclaim` and job state. Per array: type, address, user, fingerprint, vendor settings | `PVE::SAN::Config::update` under the `pvesan` cfs domain lock |
 | Array secrets | `/etc/pve/priv/pvesan/<array>.pw` | Password or API token | Root only |
 | LVM metadata | On the LUNs | VG, PVs, LVs | LVM commands, only under `cluster_lock_storage` |
 | Rendered, per node | `/etc/multipath/conf.d/pvesan.conf`, `/etc/multipath/wwids`, LVM devices file | Aliases, policies, blacklist of detached WWIDs, claimed WWIDs | `PVE::SAN::Ops::sync` |
@@ -167,6 +168,26 @@ Array drivers turn pvesan from a SAN manager into a provisioning tool. The array
 | Hitachi VSP | `/ConfigurationManager/v1/objects/storages/<id>`, session token, jobs awaited | OpenStack Cinder Hitachi driver, Configuration Manager reference | One host group per target port; LU path on each | `naaId` (known after mapping) |
 | Fujitsu ETERNUS DX S5 / AF S3 | `:5665/api/v1/...`, `POST session` → Bearer token, jobs awaited and deleted | ETERNUS RESTful API Reference (P3AG-5492) | One FC host per WWN (the API has no host groups); every volume connected to all of them with one host LUN | `3` + `uid` |
 
+### Array snapshots and copies
+
+`PVE::SAN::Snapshot` builds the datastore-level workflows on five optional driver primitives: `snapshot_create(\@vols, $name)` (one point in time for all volumes), `snapshots(\@vols)`, `snapshot_delete`, `snapshot_clone` (a new writable, unmapped volume) and `snapshot_restore` (overwrite a volume in place). `supports_snapshots` and `supports_group_snapshots` say what a driver can do; the base class dies with "not supported yet" for the rest.
+
+| Platform | Snapshot | Several volumes | Clone | Restore in place | Checked against |
+| --- | --- | --- | --- | --- | --- |
+| Pure FlashArray | `POST volume-snapshots?source_names=<vol>` `{suffix}` | Protection group `pvesan-<vol>`, `POST protection-group-snapshots` | `POST volumes` `{source}` | `POST volumes?overwrite=true` `{source}` | go-pure-client FA 2.50 docs |
+| INFINIDAT InfiniBox | `POST volumes` `{name, parent_id, write_protected}` | `POST volumes/group_snapshot` | Writable child of the snapshot | `POST volumes/<id>/restore` | InfiniSDK (`dataset.py`, `volume.py`) |
+| Dell PowerStore | `POST volume/<id>/snapshot` `{name}` | Not yet (volume groups) | `POST volume/<snap>/clone` | `POST volume/<id>/restore` `{from_snap_id, create_backup_snap}` | PyPowerStore (`protection.py`, `provisioning.py`) |
+
+A **snapshot set** is every array snapshot with the same pvesan name across the datastore's volumes (`group_sets`); a set missing a volume is listed as incomplete and can't be mounted or rolled back. A group snapshot (Pure protection group) is deleted once, not per member.
+
+**Mount as copy.** Clone each member, map the clones, `wait_visible`, register the devices under the copy's ID (aliases, multipath), then `vgimportclone --basevgname san_<copy>` on the coordinating node, which writes new PV and VG UUIDs so LVM never sees two VGs with the same identity for longer than the import. Every LV is set read-only (`lvchange --permission r`) and the copy is registered as an `fcsan` storage with content `images`. The cluster DB records `{ array, volumes, copy_of, snapshot }`, so remove-copy is the normal delete-with-volume. A failure at any step unmaps and deletes the clones again.
+
+**Restore a VM.** The VM's current config gives the disks on the datastore; each one present in the copy is copied with `qemu-img convert -n` (raw over the live LV with the VM stopped, or converted to raw into newly allocated volumes for a new VM ID). A disk that is a qcow2 volume-chain layer with a backing file in the copy is refused, because it can't be restored on its own. `new_vm_config` (a pure function, unit tested) rewrites the config for a new VM: disks remapped, other storages dropped, new MACs, SMBIOS UUID and vmgenid, links down.
+
+**Roll back.** Requires a typed confirmation, every guest stopped, every node of the datastore online and no mounted copy. The storage is disabled, the VG deactivated on all nodes, each volume restored by the array, every node re-reads the LUNs, and the storage is enabled again.
+
+**Schedules.** The cluster DB holds `snapshot_schedule = { interval, keep }`, `auto_reclaim` and per-job state `{ last, error, claimed }`. `pvesan-snapshot.timer` (every 15 minutes) and `pvesan-reclaim.timer` (weekly) fire on every node. Each run reads the config without a lock and returns at once if nothing is due; otherwise it claims the due jobs under the `pvesan` domain lock (a claim older than 6 hours is taken over, in case a node died mid-run), runs them outside the lock and records the result. Retention removes only `auto-<date>-<time>` snapshots beyond `keep`, never manual or mounted ones.
+
 ## Consistency, locking, safety, permissions
 
 The one invariant: **only one node at a time writes LVM metadata for a shared VG, and every node sees the same device size before LVM is told about it.**
@@ -175,7 +196,7 @@ The one invariant: **only one node at a time writes LVM metadata for a shared VG
 | --- | --- | --- | --- |
 | Cluster storage lock | `PVE::Storage::Plugin->cluster_lock_storage($id, 1, 60, ...)` | `pvcreate`/`vgextend`, `pvresize`, reclaim LV create/remove; Proxmox VE's own volume allocation takes it too | Seconds |
 | storage.cfg lock | `PVE::Storage::lock_storage_config` | ID rename (section move plus `vgrename`) | Seconds |
-| pvesan domain lock | `cfs_lock_domain('pvesan')` | Read-modify-write of `config.json` | Milliseconds |
+| pvesan domain lock | `cfs_lock_domain('pvesan')` | Read-modify-write of `config.json`, and the claim of scheduled snapshot and reclaim jobs | Milliseconds |
 
 pmxcfs aborts code holding a lock for more than 60 s, so every slow step (node fan-out, waiting for maps, `blkdiscard`, array calls) stays outside locks.
 
@@ -209,7 +230,7 @@ pmxcfs aborts code holding a lock for more than 60 s, so every slow step (node f
 
 **Layers.** `Util`, `Sysfs`, `Multipath` (parsing/rendering) and `LVM` (parsing) are pure Perl and read sysfs through `PVESAN_SYSFS_ROOT`, so a fixture tree replaces `/sys`. `Inventory`, `Ops`, `Config` and `Cluster` add Proxmox VE and command execution; `Datastore` and `Provision` compose them; `API2::SAN` exposes them; the CLI and GUI sit only on the API.
 
-**Tests** (`make test`, 356 checks):
+**Tests** (`make test`, 505 checks):
 
 | File | Covers |
 | --- | --- |
@@ -218,11 +239,12 @@ pmxcfs aborts code holding a lock for more than 60 s, so every slow step (node f
 | `t/30-multipath.t` | Path-state parsing, golden multipath config render |
 | `t/40-lvm.t` | LVM JSON reports |
 | `t/50-cluster.t` | The exact `pvesh` command lines of the fan-out |
-| `t/60…66-*.t` | Every array driver against a fake array that keeps state (`t/lib/FakeArray.pm`): auth, request bodies, registration, full volume lifecycle, error formats |
+| `t/60…66-*.t`, `t/67-snapshots.t` | Every array driver against a fake array that keeps state (`t/lib/FakeArray.pm`): auth, request bodies, registration, full volume lifecycle, error formats |
+| `t/68-snapshot-workflow.t` | Snapshot sets, retention, due jobs, VM config rewriting, and the snapshot, mount-copy, rollback and schedule workflows against a fake driver with the cluster steps stubbed |
 | `t/80-integrate.t` | `pvesan-integrate` against a fake pve-manager tree: insertion point, upgrade from an older line, refusal without the anchor, exact removal, and that the patched `Nodes.pm` still loads with a broken pve-fcsan |
 | `t/90-compile.t` | Loads every module; fails on compile warnings. Uses the real Proxmox VE libraries when present, stubs otherwise |
 
-The build also checks that every Proxmox function the code calls exists in the installed libraries, that the REST router accepts all 36 API paths, that `pvesan.js` parses, and that every module is in the package. CI runs the tests on every push.
+The build also checks that every Proxmox function the code calls exists in the installed libraries, that the REST router accepts every API path, that `pvesan.js` parses, and that every module is in the package. CI runs the tests on every push.
 
 **Validation so far.** The plugin runs on a 6-node Proxmox VE 9.2 cluster with QLogic and Emulex HBAs: install, integration, services, storage plugin, API, CLI, GUI asset, local and cluster rescan, refusal of invisible LUNs and CLI exit codes are verified there, and every array driver's first call was checked over pinned TLS. That lab work found and fixed seven bugs that unit tests could not see (an API path clash, a non-existent helper call, arguments lost in the cluster fan-out, a packaging omission, among others). Array drivers have not yet run against real arrays.
 
@@ -246,6 +268,7 @@ The build also checks that every Proxmox function the code calls exists in the i
 - [ ] Reclaim on a thin LUN and confirm space returns on the array
 - [ ] Delete with `--detach`, unmap, rescan, confirm no dead paths remain
 - [ ] For each array driver: add, register, provision, grow, delete with volume
+- [ ] For each driver with snapshots: snapshot, mount a copy, restore a VM over its disks and into a new ID, remove the copy, roll back a test datastore
 - [ ] Upgrade pve-manager and confirm `pvesan-integrate status`
 
 ## Limitations, known risks, roadmap
@@ -258,11 +281,12 @@ The build also checks that every Proxmox function the code calls exists in the i
 | Code in pve-storage or qemu-server that tests `type eq 'lvm'` | An `fcsan` storage could miss an LVM-specific branch | Snapshot, clone and migrate a VM on `fcsan`; fall back by changing the type to `lvm` |
 | `Nodes.pm` anchor text changes | The integration can't find its insertion point | `pvesan-integrate apply` reports it and changes nothing |
 | Widget-toolkit API drift | GUI classes could change in a new Proxmox VE | Open the panel after upgrades; check the browser console |
+| Duplicate PVs while a copy is imported | Between mapping a clone and `vgimportclone`, LVM on other nodes sees two PVs with the same UUID and may refuse metadata changes on the source VG for those seconds | Mount copies outside busy periods; the task log shows the import step |
 
 **Functional limits compared with vCenter**
 
 - Thick LVM only at the datastore layer (the array can still be thin). Per-VM snapshots on shared storage need Proxmox VE 9 volume chains.
-- No automatic resignaturing of snapshot or replica LUNs (manual `vgimportclone` procedure in the runbook).
+- Array snapshots, copies and restores need a driver with snapshot support (Pure, InfiniBox, PowerStore); for other arrays snapshot or replica LUNs are imported by hand (`vgimportclone` procedure in the runbook). Snapshots are crash-consistent; VMs are not frozen.
 - No Storage I/O Control, datastore clusters, Storage DRS or datastore browser. Datastores can't be shrunk.
 - Nodes offline during a change catch up at boot through `pvesan-sync.service`.
 
@@ -271,5 +295,5 @@ The build also checks that every Proxmox function the code calls exists in the i
 1. Real-array validation for every driver; fix what it finds.
 2. A datacenter-level GUI view: all nodes' paths for one LUN side by side.
 3. `datastore adopt`: convert existing `lvm` storages on SAN to `fcsan`.
-4. Guided snapshot-LUN import (resignature) and array snapshots.
+4. Array snapshots for the remaining drivers; consistency groups on PowerStore; container restore.
 5. Per-LUN path statistics and fabric events.

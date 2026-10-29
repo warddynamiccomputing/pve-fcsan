@@ -460,7 +460,7 @@ sub restore_vm {
         }
         push @disks, $d;
     }
-    die "none of VM $vmid's disks on '$src' exist in snapshot '$ds->{snapshot}'\n" if !@disks;
+    die "none of VM ${vmid}'s disks on '$src' exist in snapshot '$ds->{snapshot}'\n" if !@disks;
 
     my $check_stopped = sub {
         my $s = PVE::SAN::Cluster::guest_status()->{$vmid} // {};
