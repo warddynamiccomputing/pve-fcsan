@@ -358,6 +358,26 @@ pvesan refuses unless every guest using the datastore is stopped, every node of 
 - **Weekly reclaim:** `pvesan snapshot schedule gold01 --auto-reclaim 1` (GUI: **Snapshots → Schedule → Weekly reclaim**) runs P8 once a week. `pvesan-reclaim.timer` fires on every node on Sunday night; one node that has the datastore claims each run. It works on any datastore whose LUNs support UNMAP, with or without an array driver.
 - **Discard on delete:** `pvesm set gold01 --fc-discard 1` sends UNMAP for a VM disk's blocks just before the disk is removed, so a thin array frees the space at once. It makes deletes slower (the discard runs inside Proxmox's storage lock, which times out after 60 s; for very large disks on a slow array keep it off and rely on the weekly reclaim). It is ignored on datastores with `saferemove`, which already wipe removed disks.
 
+### P17. Per-disk array volumes (`fcsanvol`, preview)
+
+Storage type `fcsanvol` gives every VM disk its own array volume, the Proxmox equivalent of vVols: disks are thin on the array, and Proxmox's own snapshot, rollback, template, clone and resize actions become array operations that take seconds. It needs an array driver with per-disk volume support; so far that is **Pure FlashArray** (`pure`). Shared-LVM datastores stay as they are and work on every array.
+
+```bash
+pvesm add fcsanvol fa-vols --fc-array fa1 --fc-pool default --content images
+```
+
+| Proxmox action | What happens on the array |
+| --- | --- |
+| Create a disk | A new volume `<storage>-vm-<id>-disk-<n>`, connected to the cluster's host group; the LUN number is recorded |
+| Start or migrate the VM | The node scans only that LUN number on its adapters (`- - <lun>`), not the whole fabric, and waits for the multipath map `/dev/mapper/<storage>-vm-<id>-disk-<n>` |
+| Snapshot / rollback / delete snapshot | Volume snapshot / overwrite from the snapshot / destroy the snapshot. Snapshot names must use letters, digits and `-` (no `_`) |
+| Convert to template | The volume is renamed to `...-base-<id>-disk-<n>` |
+| Linked clone, clone from a snapshot | An array copy: seconds, no space until written |
+| Resize | Volume expand, then the node running the VM re-reads the LUN |
+| Delete the disk | Paths removed on every node, volume disconnected and destroyed (recoverable on Pure until eradicated) |
+
+**Limits.** Every disk is a LUN on every node. `fc-max-luns` (default 255) stops new disks before the array's or HBA's LUN limit; raise it only if your array and HBAs allow more LUNs per host. Raw disks only: no containers, no cloud-init drive and no qcow2. `deactivate` keeps the LUN visible on a node, so a node that ever ran a VM keeps its paths until the disk is deleted. Disk moves between `fcsanvol` and other storages use Proxmox's normal host copy. This storage type has not run on a real array yet; try it with a test VM first.
+
 ## Troubleshooting and recovery
 
 Start from the task log. Every cluster-wide step prints `[node] FAILED: <reason>`, and that reason is the stderr of the LVM or multipath command, or the array's error message.
@@ -454,6 +474,14 @@ There are also two internal steps, `POST devices/{wwid}/detach-local` and `POST 
 | `fc-wwids` | set at create | WWIDs of the backing LUNs, comma separated |
 | `fc-autorescan` | `1` | Rescan the SAN on activation when a backing LUN is missing |
 | `fc-discard` | `0` | UNMAP a volume's blocks before it is removed (P16); ignored with `saferemove` |
+
+**Storage options** of the `fcsanvol` type (P17):
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `fc-array` | required, fixed | pvesan array the disk volumes are created on |
+| `fc-pool` | required | Array pool for new volumes (`default` on Pure) |
+| `fc-max-luns` | `255` | Most disk volumes on this storage |
 
 Example entry:
 
