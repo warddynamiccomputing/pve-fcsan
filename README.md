@@ -11,7 +11,7 @@ With an array driver it goes one step further, like the Pure Storage or
 INFINIDAT vSphere plugins: **one form creates the volume on the array, maps it
 to the cluster, rescans every node and builds the datastore.**
 
-> **Status: beta.** Everything below is implemented and covered by 585
+> **Status: beta.** Everything below is implemented and covered by 659
 > automated tests, and the plugin runs on a 6-node Proxmox VE 9.2 lab with
 > QLogic and Emulex HBAs. **No array driver has yet been exercised against a
 > real array.** Try each new array type with a small test datastore first, and

@@ -191,7 +191,9 @@ A **snapshot set** is every array snapshot with the same pvesan name across the 
 
 **Schedules.** The cluster DB holds `snapshot_schedule = { interval, keep }`, `auto_reclaim` and per-job state `{ last, error, claimed }`. `pvesan-snapshot.timer` (every 15 minutes) and `pvesan-reclaim.timer` (weekly) fire on every node. Each run reads the config without a lock and returns at once if nothing is due; otherwise it claims the due jobs under the `pvesan` domain lock (a claim older than 6 hours is taken over, in case a node died mid-run), runs them outside the lock and records the result. Retention removes only `auto-<date>-<time>` snapshots beyond `keep`, never manual or mounted ones.
 
-### Per-disk array volumes (`fcsanvol`)
+### Per-disk array volumes (`fcsanvol`, experimental)
+
+> **Experimental in 1.5.0:** Pure FlashArray only, raw VM disks only, and not yet run on a real array.
 
 `PVE::Storage::Custom::FCSANVolPlugin` is a second storage type that maps the Proxmox storage plugin API onto array volumes; `PVE::SAN::Volume` holds the logic so it is unit tested without Proxmox.
 
@@ -278,7 +280,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 
 **Layers.** `Util`, `Sysfs`, `Multipath` (parsing/rendering) and `LVM` (parsing) are pure Perl and read sysfs through `PVESAN_SYSFS_ROOT`, so a fixture tree replaces `/sys`. `Inventory`, `Ops`, `Config` and `Cluster` add Proxmox VE and command execution; `Datastore` and `Provision` compose them; `API2::SAN` exposes them; the CLI and GUI sit only on the API.
 
-**Tests** (`make test`, 585 checks):
+**Tests** (`make test`, 659 checks):
 
 | File | Covers |
 | --- | --- |
@@ -289,10 +291,10 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 | `t/50-cluster.t` | The exact `pvesh` command lines of the fan-out |
 | `t/60…66-*.t`, `t/67-snapshots.t` | Every array driver against a fake array that keeps state (`t/lib/FakeArray.pm`): auth, request bodies, registration, full volume lifecycle, error formats |
 | `t/68-snapshot-workflow.t` | Snapshot sets, retention, due jobs, VM config rewriting, and the snapshot, mount-copy, rollback and schedule workflows against a fake driver with the cluster steps stubbed |
+| `t/69-monitor.t` | I/O rates, path problems and learned path counts, alert differences, pool and health problems, zoning hints, new and stale hosts, `no_path_retry` rendering, the monitoring primitives of Pure, InfiniBox and PowerStore, and the monitor run (lease, registration, alerts sent once) |
 | `t/70-volumes.t` | `fcsanvol`: names and aliases, Pure's per-disk primitives, allocation with rollback on failure, the LUN limit, targeted activation, resize, snapshots, rollback, templates, linked clones, delete, and the plugin's features |
 | `t/80-integrate.t` | `pvesan-integrate` against a fake pve-manager tree: insertion point, upgrade from an older line, refusal without the anchor, exact removal, and that the patched `Nodes.pm` still loads with a broken pve-fcsan |
 | `t/90-compile.t` | Loads every module; fails on compile warnings. Uses the real Proxmox VE libraries when present, stubs otherwise |
-| `t/69-monitor.t` | I/O rates, path problems and learned path counts, alert differences, pool and health problems, zoning hints, new and stale hosts, `no_path_retry` rendering, the monitoring primitives of Pure, InfiniBox and PowerStore, and the monitor run (lease, registration, alerts sent once) |
 
 The build also checks that every Proxmox function the code calls exists in the installed libraries, that the REST router accepts every API path, that `pvesan.js` parses, and that every module is in the package. CI runs the tests on every push.
 
