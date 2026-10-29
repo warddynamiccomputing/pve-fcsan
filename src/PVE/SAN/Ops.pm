@@ -112,6 +112,19 @@ sub rescan {
     };
 }
 
+# Scan one LUN number on every FC/iSCSI host instead of the whole fabric
+# ("- - <lun>": all channels and targets, that LUN only). Used when a VM disk
+# volume is activated, so a node with hundreds of LUNs is not rescanned.
+sub rescan_lun {
+    my ($lun) = @_;
+    die "invalid LUN number '$lun'\n" if !defined($lun) || $lun !~ /^\d+$/;
+    for my $h (@{PVE::SAN::Sysfs::fc_hosts()}, @{PVE::SAN::Sysfs::iscsi_hosts()}) {
+        eval { write_attr("/sys/class/scsi_host/$h->{name}/scan", "- - $lun") };
+        warn "scan of LUN $lun on $h->{name} failed: $@" if $@;
+    }
+    settle();
+}
+
 # Bring local multipath/LVM configuration in line with the cluster config.
 sub sync {
     my $cfg = PVE::SAN::Config::load();

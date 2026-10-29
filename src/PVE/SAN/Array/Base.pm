@@ -238,6 +238,24 @@ sub snapshot_delete { $_[0]->not_supported('array snapshots') }
 sub snapshot_clone { $_[0]->not_supported('cloning array snapshots') }
 sub snapshot_restore { $_[0]->not_supported('restoring array snapshots') }
 
+# --- one array volume per VM disk (storage type fcsanvol) ---
+#
+# Optional; supports_disk_volumes() says whether a driver has them:
+#
+#   volumes_named($prefix)           -> [ volume ] whose name starts with $prefix
+#   volume_by_name($name)            -> volume or undef
+#   host_lun($vol_id, $hcname)       -> LUN number the host cluster sees it as
+#   copy_volume($vol_id, $name)      -> volume: a new, independent, unmapped copy
+#   rename_volume($vol_id, $name)
+
+sub supports_disk_volumes { return 0; }
+
+sub volumes_named { $_[0]->not_supported('volumes per VM disk') }
+sub volume_by_name { $_[0]->not_supported('volumes per VM disk') }
+sub host_lun { $_[0]->not_supported('volumes per VM disk') }
+sub copy_volume { $_[0]->not_supported('copying volumes') }
+sub rename_volume { $_[0]->not_supported('renaming volumes') }
+
 # Common argument checks for snapshot_create.
 sub check_snapshot_args {
     my ($self, $vols, $name) = @_;

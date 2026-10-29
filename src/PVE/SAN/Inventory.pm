@@ -119,7 +119,9 @@ sub devices {
         # what is this LUN used for?
         my $pv = $d->{dm} ? $pvs->{$d->{dm}} : undef;
         $pv //= $pvs->{$_->{dev}} for @{$d->{paths}}; # PV on a raw path: bad, but report it
-        if ($pv && $pv->{vg_name}) {
+        if ($dc->{disk}) { # a VM disk of an fcsanvol storage
+            $d->{usage} = "vm-disk:$dc->{datastore}:$dc->{disk}";
+        } elsif ($pv && $pv->{vg_name}) {
             my $storeid = $vgmap->{$pv->{vg_name}};
             $d->{usage} = $storeid ? "datastore:$storeid" : "lvm-vg:$pv->{vg_name}";
             $d->{vgname} = $pv->{vg_name};

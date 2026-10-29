@@ -121,7 +121,7 @@ sub check_unused_locally {
         my $d = $local->{$wwid} // die "LUN $wwid not found on this node\n";
         my $usage = $d->{usage};
         next if $usage eq 'free';
-        die "LUN $wwid is in use ($usage)\n" if $usage =~ /^(?:datastore|lvm-vg|in-use|unknown)/;
+        die "LUN $wwid is in use ($usage)\n" if $usage =~ /^(?:datastore|lvm-vg|in-use|vm-disk|unknown)/;
         die "LUN $wwid has existing data ($usage); use 'force' to wipe it\n" if !$force;
         print "WARNING: wiping existing $usage on LUN $wwid\n";
         push @wipe, $wwid;
@@ -533,7 +533,7 @@ sub device_detach {
         my ($d) = grep { $_->{wwid} eq $wwid } @{$res->{$node} // []};
         next if !$d;
         die "[$node] device is in use ($d->{usage})\n"
-            if $d->{usage} =~ /^(?:datastore|lvm-vg|lvm-pv|in-use)/;
+            if $d->{usage} =~ /^(?:datastore|lvm-vg|lvm-pv|in-use|vm-disk)/;
     }
 
     PVE::SAN::Config::update(sub {
