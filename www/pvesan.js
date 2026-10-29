@@ -19,6 +19,12 @@ Proxmox.Utils.override_task_descriptions({
     pvesanregister: ['SAN Array', gettext('Register cluster')],
     pvesanprovision: ['SAN Array', gettext('Provision datastore')],
     pvesanarraygrow: ['SAN Array', gettext('Grow datastore')],
+    pvesansnapshot: ['SAN Datastore', gettext('Take array snapshot')],
+    pvesansnapdel: ['SAN Datastore', gettext('Delete array snapshot')],
+    pvesansnapmount: ['SAN Datastore', gettext('Mount snapshot as copy')],
+    pvesanrollback: ['SAN Datastore', gettext('Roll back to snapshot')],
+    pvesancopyremove: ['SAN Datastore', gettext('Remove snapshot copy')],
+    pvesanrestorevm: ['VM', gettext('Restore from array snapshot')],
 });
 
 Ext.define('PVE.san.Utils', {
@@ -774,7 +780,9 @@ Ext.define('PVE.san.DatastoreGrid', {
 	    header: gettext('Array'),
 	    dataIndex: 'array',
 	    width: 140,
-	    renderer: (v, m, rec) => (v ? Ext.htmlEncode(`${v}: ${rec.data.volumes}`) : '-'),
+	    renderer: (v, m, rec) => (rec.data.copy_of
+		? Ext.htmlEncode(`${gettext('copy of')} ${rec.data.copy_of} @ ${rec.data.snapshot}`)
+		: v ? Ext.htmlEncode(`${v}: ${rec.data.volumes}`) : '-'),
 	},
 	{
 	    header: gettext('Status'),
@@ -844,6 +852,22 @@ Ext.define('PVE.san.DatastoreGrid', {
 		    Ext.htmlEncode(r.data.storage)),
 		handler: () => PVE.san.Utils.runTask({
 		    url: me.url(`datastores/${rec().storage}/reclaim`), done: () => me.reload(),
+		}),
+	    },
+	    {
+		xtype: 'proxmoxButton', text: gettext('Restore VM'), selModel: sm, disabled: true,
+		enableFn: r => !!r.data.copy_of,
+		handler: () => Ext.create('PVE.san.RestoreVM', {
+		    nodename: me.nodename, storage: rec().storage, record: rec(), autoShow: true,
+		}),
+	    },
+	    {
+		xtype: 'proxmoxButton', text: gettext('Remove copy'), selModel: sm, disabled: true,
+		enableFn: r => !!r.data.copy_of,
+		confirmMsg: r => Ext.String.format(gettext('Remove snapshot copy {0} and its clone volume on the array? The snapshot itself stays.'),
+		    Ext.htmlEncode(r.data.storage)),
+		handler: () => PVE.san.Utils.runTask({
+		    url: me.url(`datastores/${rec().storage}/remove-copy`), done: () => me.reload(),
 		}),
 	    },
 	    {
@@ -1229,6 +1253,202 @@ Ext.define('PVE.san.ArrayGrid', {
     },
 });
 
+// --- array snapshots ---
+
+Ext.define('PVE.san.ScheduleEdit', {
+    extend: 'Proxmox.window.Edit',
+
+    subject: gettext('Snapshot schedule'),
+    width: 460,
+
+    initComponent: function() {
+	let me = this;
+	me.url = `/nodes/${me.nodename}/san/datastores/${me.storage}/schedule`;
+	me.method = 'PUT';
+	me.items = [{
+	    xtype: 'inputpanel',
+	    onGetValues: function(values) {
+		let res = {};
+		if (values['snapshot-interval']) {
+		    res['snapshot-interval'] = values['snapshot-interval'];
+		    res['snapshot-keep'] = values['snapshot-keep'] || 7;
+		} else {
+		    res.delete = 'snapshot-interval';
+		}
+		res['auto-reclaim'] = values['auto-reclaim'] ? 1 : 0;
+		return res;
+	    },
+	    items: [
+		{ xtype: 'displayfield', fieldLabel: gettext('Datastore'), value: Ext.htmlEncode(me.storage) },
+		{ xtype: 'proxmoxintegerfield', name: 'snapshot-interval', fieldLabel: gettext('Snapshot every') + ' (h)',
+		    minValue: 0, maxValue: 8760, emptyText: gettext('none') },
+		{ xtype: 'proxmoxintegerfield', name: 'snapshot-keep', fieldLabel: gettext('Keep'), minValue: 1, maxValue: 1000,
+		    emptyText: '7' },
+		{ xtype: 'proxmoxcheckbox', name: 'auto-reclaim', fieldLabel: gettext('Weekly reclaim'), uncheckedValue: 0 },
+		{ xtype: 'displayfield', userCls: 'pmx-hint',
+		    value: gettext('Scheduled snapshots are named auto-<date>-<time>; only those are removed when more than "Keep" exist. Weekly reclaim sends UNMAP for the free space (needs a thin LUN with UNMAP).') },
+	    ],
+	}];
+	me.callParent();
+	me.load({
+	    success: function(response) {
+		let d = response.result.data;
+		me.setValues({
+		    'snapshot-interval': d['snapshot-interval'] || '',
+		    'snapshot-keep': d['snapshot-keep'] || '',
+		    'auto-reclaim': d['auto-reclaim'],
+		});
+	    },
+	});
+    },
+});
+
+Ext.define('PVE.san.RestoreVM', {
+    extend: 'Proxmox.window.Edit',
+
+    subject: gettext('Restore VM from snapshot copy'),
+    width: 500,
+    isCreate: true,
+    showTaskViewer: true,
+
+    initComponent: function() {
+	let me = this;
+	me.url = `/nodes/${me.nodename}/san/datastores/${me.storage}/restore-vm`;
+	me.method = 'POST';
+	me.items = [{
+	    xtype: 'inputpanel',
+	    onGetValues: values => PVE.san.Utils.joinValues(values),
+	    items: [
+		{ xtype: 'displayfield', fieldLabel: gettext('Copy'), value: Ext.htmlEncode(`${me.storage} (${me.record.copy_of} @ ${me.record.snapshot})`) },
+		{ xtype: 'pveGuestIDSelector', name: 'vmid', guestType: 'qemu', isCreate: false, fieldLabel: gettext('VM') },
+		{ xtype: 'proxmoxintegerfield', name: 'target-vmid', minValue: 100, maxValue: 999999999, allowBlank: true,
+		    fieldLabel: gettext('New VM ID'), emptyText: gettext('restore over the live disks') },
+		{ xtype: 'displayfield', userCls: 'pmx-hint',
+		    value: gettext('Without a new VM ID the VM must be stopped and its disks on the datastore are overwritten with the snapshot. With a new ID the disks are copied to a new VM whose network links start down.') },
+	    ],
+	}];
+	me.callParent();
+    },
+});
+
+Ext.define('PVE.san.SnapshotGrid', {
+    extend: 'Ext.grid.Panel',
+    alias: 'widget.pveSanSnapshotGrid',
+
+    title: gettext('Snapshots'),
+    stateful: true,
+    stateId: 'grid-pvesan-snapshots',
+
+    columns: [
+	{ header: gettext('Name'), dataIndex: 'name', flex: 1 },
+	{ header: gettext('Created'), dataIndex: 'created', width: 160, renderer: Proxmox.Utils.render_timestamp },
+	{ header: gettext('Size'), dataIndex: 'size', width: 100, renderer: Proxmox.Utils.render_size },
+	{ header: gettext('Volumes'), dataIndex: 'volumes', width: 80 },
+	{ header: gettext('Scheduled'), dataIndex: 'auto', width: 90, renderer: Proxmox.Utils.format_boolean },
+	{ header: gettext('Mounted as'), dataIndex: 'copy', width: 200, renderer: v => Ext.htmlEncode(v || '-') },
+    ],
+
+    initComponent: function() {
+	let me = this;
+	let sm = Ext.create('Ext.selection.RowModel', {});
+	me.selModel = sm;
+	me.store = Ext.create('Ext.data.Store', { sorters: [{ property: 'created', direction: 'DESC' }] });
+	let storage = () => me.down('#dsSelect').getValue();
+	let rec = () => sm.getSelection()[0].data;
+	let base = suffix => `/nodes/${me.nodename}/san/datastores/${storage()}/${suffix}`;
+	let reload = () => me.reload();
+
+	me.tbar = [
+	    {
+		xtype: 'combobox',
+		itemId: 'dsSelect',
+		fieldLabel: gettext('Datastore'),
+		labelWidth: 70,
+		width: 280,
+		editable: false,
+		queryMode: 'local',
+		displayField: 'storage',
+		valueField: 'storage',
+		store: Ext.create('Ext.data.Store', {
+		    proxy: { type: 'proxmox', url: `/api2/json/nodes/${me.nodename}/san/datastores` },
+		    filters: [r => !!r.data.array && !r.data.copy_of],
+		    autoLoad: true,
+		}),
+		listeners: { change: reload },
+	    },
+	    {
+		text: gettext('Take snapshot'),
+		iconCls: 'fa fa-camera',
+		handler: () => {
+		    if (!storage()) { return; }
+		    Ext.Msg.prompt(gettext('Take snapshot'),
+			gettext('Name (empty: pvesan-<date>-<time>). The snapshot is crash-consistent; running VMs are not paused.'),
+			function(btn, name) {
+			    if (btn !== 'ok') { return; }
+			    PVE.san.Utils.runTask({ url: base('snapshots'), params: name ? { name } : {}, done: reload });
+			});
+		},
+	    },
+	    {
+		xtype: 'proxmoxButton', text: gettext('Mount as copy'), selModel: sm, disabled: true,
+		enableFn: r => !r.data.copy,
+		confirmMsg: r => Ext.String.format(
+		    gettext('Clone snapshot {0} on the array and mount it read-only as a new datastore?'), Ext.htmlEncode(r.data.name)),
+		handler: () => PVE.san.Utils.runTask({ url: base(`snapshots/${rec().name}/mount`), done: reload }),
+	    },
+	    {
+		xtype: 'proxmoxButton', text: gettext('Delete'), selModel: sm, disabled: true,
+		enableFn: r => !r.data.copy,
+		confirmMsg: r => Ext.String.format(gettext('Delete array snapshot {0}?'), Ext.htmlEncode(r.data.name)),
+		handler: () => PVE.san.Utils.runTask({ url: base(`snapshots/${rec().name}`), method: 'DELETE', done: reload }),
+	    },
+	    {
+		xtype: 'proxmoxButton', text: gettext('Roll back datastore'), selModel: sm, disabled: true,
+		enableFn: r => !r.data.copy,
+		handler: () => PVE.san.Utils.confirmTyped(gettext('Roll back datastore'),
+		    Ext.String.format(gettext('Restore the whole datastore {0} to snapshot {1}? Every guest on it must be stopped. Everything written since the snapshot is lost.'),
+			Ext.htmlEncode(storage()), Ext.htmlEncode(rec().name)),
+		    storage(),
+		    () => PVE.san.Utils.runTask({
+			url: base(`snapshots/${rec().name}/rollback`), params: { confirm: storage() }, done: reload,
+		    })),
+	    },
+	    {
+		text: gettext('Schedule'),
+		iconCls: 'fa fa-clock-o',
+		handler: () => storage() && Ext.create('PVE.san.ScheduleEdit', {
+		    nodename: me.nodename, storage: storage(), autoShow: true,
+		}),
+	    },
+	    '->',
+	    { text: gettext('Reload'), iconCls: 'fa fa-refresh', handler: reload },
+	];
+	me.callParent();
+	me.on('activate', () => {
+	    me.down('#dsSelect').getStore().load();
+	    reload();
+	});
+    },
+
+    reload: function() {
+	let me = this;
+	let storage = me.down('#dsSelect').getValue();
+	if (!storage) {
+	    me.store.removeAll();
+	    return;
+	}
+	Proxmox.Utils.API2Request({
+	    url: `/nodes/${me.nodename}/san/datastores/${storage}/snapshots`,
+	    method: 'GET',
+	    success: response => me.store.loadData(response.result.data),
+	    failure: response => {
+		me.store.removeAll();
+		Ext.Msg.alert(gettext('Error'), response.htmlStatus);
+	    },
+	});
+    },
+});
+
 Ext.define('PVE.san.Panel', {
     extend: 'Ext.tab.Panel',
     alias: 'widget.pveSanPanel',
@@ -1238,6 +1458,7 @@ Ext.define('PVE.san.Panel', {
 	let nodename = me.nodename || me.pveSelNode.data.node;
 	me.items = [
 	    { xtype: 'pveSanDatastoreGrid', nodename },
+	    { xtype: 'pveSanSnapshotGrid', nodename },
 	    { xtype: 'pveSanArrayGrid', nodename },
 	    { xtype: 'pveSanDeviceGrid', nodename },
 	    { xtype: 'pveSanPathGrid', nodename },
