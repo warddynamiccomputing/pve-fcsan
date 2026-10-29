@@ -29,6 +29,7 @@ to the cluster, rescans every node and builds the datastore.**
 | Arrays | Add an array with a pinned TLS certificate, register the cluster's hosts, **provision a datastore end to end**, grow on the array, delete including the array volume |
 | Array snapshots | Snapshot a datastore on the array (on a schedule with retention, too), mount a snapshot as a read-only copy datastore, **restore one VM** from it over its disks or into a new VM, roll a whole datastore back (Pure, InfiniBox, PowerStore) |
 | Space | Weekly automatic UNMAP reclaim per datastore; optional discard when a VM disk is deleted |
+| Per-disk volumes (**experimental**) | Storage type `fcsanvol`: every VM disk is its own array volume; snapshots, rollback, templates, linked clones and resize are array operations (Pure) |
 
 A datastore is a shared thick-LVM volume group on multipathed LUNs, registered
 as storage type `fcsan` (a subclass of Proxmox's own LVM plugin), so live
@@ -145,6 +146,7 @@ Server Solutions; check `pvesan-integrate status` after upgrades.
 | Path | What |
 | --- | --- |
 | `src/PVE/Storage/Custom/FCSANPlugin.pm` | storage type `fcsan` |
+| `src/PVE/Storage/Custom/FCSANVolPlugin.pm` | storage type `fcsanvol` (one array volume per disk) |
 | `src/PVE/API2/SAN.pm` | REST API `/nodes/{node}/san` |
 | `src/PVE/CLI/pvesan.pm`, `bin/pvesan` | CLI |
 | `src/PVE/SAN/*.pm` | discovery, multipath, LVM, cluster config, node ops, orchestration, provisioning |

@@ -23,7 +23,7 @@ install:
 	install -m 0644 $(ARRAY_MODULES) $(PERLDIR)/PVE/SAN/Array/
 	install -m 0644 src/PVE/API2/SAN.pm $(PERLDIR)/PVE/API2/
 	install -m 0644 src/PVE/CLI/pvesan.pm $(PERLDIR)/PVE/CLI/
-	install -m 0644 src/PVE/Storage/Custom/FCSANPlugin.pm $(PERLDIR)/PVE/Storage/Custom/
+	install -m 0644 src/PVE/Storage/Custom/FCSANPlugin.pm src/PVE/Storage/Custom/FCSANVolPlugin.pm $(PERLDIR)/PVE/Storage/Custom/
 	install -D -m 0755 bin/pvesan $(SBINDIR)/pvesan
 	install -D -m 0755 bin/pvesan-integrate $(LIBDIR)/pvesan-integrate
 	install -D -m 0644 www/pvesan.js $(WWWDIR)/pvesan.js

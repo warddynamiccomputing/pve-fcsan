@@ -389,4 +389,41 @@ sub snapshot_restore {
     $self->call('POST', '/volumes', { names => $vol, overwrite => 'true' }, { source => { name => $snap->{id} } });
 }
 
+
+# --- one array volume per VM disk ---
+# (VolumesAPI with filter and destroyed, VolumePatch name, ConnectionsAPI /
+# Connection lun, VolumePost source)
+
+sub supports_disk_volumes { return 1; }
+
+sub volumes_named {
+    my ($self, $prefix) = @_;
+    return [ map { volume_from($_) } grep { index($_->{name} // '', $prefix) == 0 }
+        @{$self->items('/volumes', { destroyed => 'false' })} ];
+}
+
+sub volume_by_name {
+    my ($self, $name) = @_;
+    die "invalid FlashArray volume name '$name'\n" if !$self->valid_name($name);
+    my ($v) = @{$self->items('/volumes', { filter => "name='$name'", destroyed => 'false' })};
+    return $v ? volume_from($v) : undef;
+}
+
+sub host_lun {
+    my ($self, $vol, $hcname) = @_;
+    my ($c) = @{$self->items('/connections', { volume_names => $vol, host_group_names => $hcname })};
+    return $c ? $c->{lun} : undef;
+}
+
+sub copy_volume {
+    my ($self, $vol, $name) = @_;
+    return $self->snapshot_clone({ id => $vol }, $name); # POST volumes {source} copies volumes and snapshots alike
+}
+
+sub rename_volume {
+    my ($self, $vol, $name) = @_;
+    die "invalid FlashArray volume name '$name'\n" if !$self->valid_name($name);
+    $self->call('PATCH', '/volumes', { names => $vol }, { name => $name });
+}
+
 1;

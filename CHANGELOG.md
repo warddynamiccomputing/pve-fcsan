@@ -4,6 +4,10 @@ The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
 ## Unreleased
+- Experimental: storage type `fcsanvol`, one array volume per VM disk (Pure
+  FlashArray). Disk snapshots, rollback, templates, linked clones and resize
+  are array operations; a node scans only the disk's LUN number when it
+  activates it; `fc-max-luns` guards LUN limits.
 - Array snapshots of datastores (Pure FlashArray, INFINIDAT InfiniBox, Dell
   PowerStore): take, list and delete from the new Snapshots tab, the
   `pvesan snapshot` commands or the API. Datastores on several volumes are
