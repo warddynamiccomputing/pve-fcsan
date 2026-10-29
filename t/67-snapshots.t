@@ -28,7 +28,7 @@ ok(!$B->valid_snapshot_name('end-'), 'no trailing dash');
 ok(!$B->valid_snapshot_name('x' x 41), 'at most 40 characters');
 
 # --- drivers without snapshots say so clearly ---
-for my $class (qw(IBMSV PowerMax ONTAP ESeries Hitachi Eternus)) {
+for my $class (qw(PowerMax ESeries Hitachi Eternus)) {
     my $c = "PVE::SAN::Array::$class";
     ok(!$c->supports_snapshots, "$class: snapshots not offered");
     my $drv = bless { address => 'x' }, $c;
@@ -203,8 +203,10 @@ for my $class (qw(IBMSV PowerMax ONTAP ESeries Hitachi Eternus)) {
 
 # ---------------- PowerStore ----------------
 {
-    my %st = (vols => { v1 => { id => 'v1', name => 'ds-a', size => 10 * $GIB, wwn => 'naa.68ccf09800aabbccddeeff0011223344', type => 'Primary' } },
+    my %st = (vols => { v1 => { id => 'v1', name => 'ds-a', size => 10 * $GIB, wwn => 'naa.68ccf09800aabbccddeeff0011223344', type => 'Primary' },
+                        v2 => { id => 'v2', name => 'ds-a-01', size => 10 * $GIB, wwn => 'naa.68ccf09800aabbccddeeff0011223355', type => 'Primary' } },
               n => 0, restored => []);
+    $st{vgs} = {};
     my ($drv, $calls) = FakeArray::driver('PVE::SAN::Array::PowerStore', {}, [
         [ GET => qr{^/api/rest/login_session$}, sub { (200, [ {} ], { 'dell-emc-token' => 'TOK' }) } ],
         [ GET => qr{^/api/rest/volume/([\w-]+)$}, sub { $st{vols}->{$_[0]->[0]} ? (200, $st{vols}->{$_[0]->[0]}) : (404, {}) } ],
@@ -222,9 +224,37 @@ for my $class (qw(IBMSV PowerMax ONTAP ESeries Hitachi Eternus)) {
             (201, { id => 'c1' }) } ],
         [ POST => qr{^/api/rest/volume/([\w-]+)/restore$}, sub { push @{$st{restored}}, [ $_[0]->[0], $_[2] ]; (200, {}) } ],
         [ DELETE => qr{^/api/rest/volume/([\w-]+)$}, sub { delete $st{vols}->{$_[0]->[0]}; (204, '') } ],
+        [ GET => qr{^/api/rest/volume_group$}, sub {
+            my ($n) = ($_[1]->{name} // '') =~ /^eq\.(.+)$/;
+            my ($src) = ($_[1]->{'protection_data->>source_id'} // '') =~ /^eq\.(.+)$/;
+            (200, [ grep { defined($n) ? $_->{name} eq $n && !$_->{source} : ($_->{source} // '') eq ($src // '-') }
+                map { $st{vgs}->{$_} } sort keys %{$st{vgs}} ]) } ],
+        [ POST => qr{^/api/rest/volume_group$}, sub {
+            $st{vgs}->{g1} = { id => 'g1', name => $_[2]->{name}, volumes => [ map { { id => $_ } } @{$_[2]->{volume_ids}} ],
+                wo => $_[2]->{is_write_order_consistent} };
+            (201, { id => 'g1' }) } ],
+        [ POST => qr{^/api/rest/volume_group/(\w+)/add_members$}, sub {
+            push @{$st{vgs}->{$_[0]->[0]}->{volumes}}, map { { id => $_ } } @{$_[2]->{volume_ids}}; (204, '') } ],
+        [ POST => qr{^/api/rest/volume_group/(\w+)/snapshot$}, sub {
+            my $g = $st{vgs}->{$_[0]->[0]};
+            my $set = 'set' . ++$st{n};
+            my @m;
+            for my $v (@{$g->{volumes}}) {
+                my $id = "$set-$v->{id}";
+                $st{vols}->{$id} = { id => $id, name => "auto name $id", size => 10 * $GIB, type => 'Snapshot',
+                    creation_timestamp => sprintf('2026-10-29T09:%02d:00Z', $st{n}), protection_data => { source_id => $v->{id} } };
+                push @m, { id => $id, name => "auto name $id" };
+            }
+            $st{vgs}->{$set} = { id => $set, name => $_[2]->{name}, source => $g->{id}, volumes => \@m };
+            (201, { id => $set }) } ],
+        [ DELETE => qr{^/api/rest/volume_group/(\w+)$}, sub {
+            my $set = delete $st{vgs}->{$_[0]->[0]};
+            delete $st{vols}->{$_->{id}} for @{$set->{volumes}};
+            (204, '') } ],
+        [ POST => qr{^/api/rest/volume_group/(\w+)/restore$}, sub { push @{$st{vg_restored}}, [ $_[0]->[0], $_[2] ]; (200, {}) } ],
     ]);
 
-    ok($drv->supports_snapshots && !$drv->supports_group_snapshots, 'PowerStore: single-volume snapshots');
+    ok($drv->supports_snapshots && $drv->supports_group_snapshots, 'PowerStore: snapshots, also of several volumes');
     my $s = $drv->snapshot_create(['v1'], 'snap1');
     is_deeply(FakeArray::find_call($calls, 'POST', qr{/snapshot$})->{body}, { name => 'ds-a.snap1' }, 'PowerStore: snapshot named after the volume');
     is_deeply([ @{$s->[0]}{qw(id name volume)} ], [ 's1', 'snap1', 'v1' ], 'PowerStore: snapshot record');
@@ -239,8 +269,6 @@ for my $class (qw(IBMSV PowerMax ONTAP ESeries Hitachi Eternus)) {
     like($q->{url}, qr/protection_data-%3E%3Esource_id=eq\.v1/, 'PowerStore: filtered by source');
     like($q->{url}, qr/type=eq\.Snapshot/, 'PowerStore: snapshots only');
 
-    eval { $drv->snapshot_create(['v1', 'v2'], 'cg') };
-    like($@, qr/consistent snapshot of several volumes is not supported yet/, 'PowerStore: several volumes refused');
 
     my $c = $drv->snapshot_clone($s->[0], 'ds-a-copy');
     is_deeply($calls->[-2]->{body}, { name => 'ds-a-copy' }, 'PowerStore: clone POST');
@@ -253,6 +281,29 @@ for my $class (qw(IBMSV PowerMax ONTAP ESeries Hitachi Eternus)) {
 
     $drv->snapshot_delete($s->[0]);
     is_deeply([ map { $_->{name} } @{$drv->snapshots(['v1'])} ], [ 'snap2' ], 'PowerStore: deleted');
+
+    # several volumes: a write-order consistent volume group, snapshotted as a whole
+    my $g = $drv->snapshot_create(['v1', 'v2'], 'cg1');
+    is($st{vgs}->{g1}->{name}, 'pvesan-ds-a', 'PowerStore: volume group named after the first volume');
+    ok($st{vgs}->{g1}->{wo}, 'PowerStore: write-order consistent');
+    is_deeply([ sort map { $_->{volume} } @$g ], [ 'v1', 'v2' ], 'PowerStore: one member per volume');
+    is_deeply([ map { $_->{name} } @$g ], [ 'cg1', 'cg1' ], 'PowerStore: members carry the set name');
+    is_deeply([ map { $_->{group} } @$g ], [ 'set3', 'set3' ], 'PowerStore: members know their set');
+    my $n_posts = scalar(grep { $_->{method} eq 'POST' && $_->{url} =~ m{/volume_group(?:/g1/add_members)?$} } @$calls);
+    $drv->snapshot_create(['v1', 'v2'], 'cg2');
+    is(scalar(grep { $_->{method} eq 'POST' && $_->{url} =~ m{/volume_group(?:/g1/add_members)?$} } @$calls), $n_posts,
+        'PowerStore: existing group reused');
+    is_deeply([ map { $_->{name} } grep { $_->{group} } @{$drv->snapshots(['v1', 'v2'])} ], [ qw(cg1 cg1 cg2 cg2) ],
+        'PowerStore: sets listed by their name');
+    is(scalar(grep { $_->{name} =~ /^auto name/ } @{$drv->snapshots(['v1', 'v2'])}), 0, 'PowerStore: members not listed twice');
+
+    $drv->snapshot_restore('v1', $g->[0]);
+    $drv->snapshot_restore('v2', $g->[1]);
+    is_deeply($st{vg_restored}, [ [ 'g1', { from_snap_id => 'set3', create_backup_snap => JSON::PP::true } ] ],
+        'PowerStore: the group restored once from the set');
+
+    $drv->snapshot_delete($g->[0]);
+    is_deeply([ map { $_->{name} } grep { $_->{group} } @{$drv->snapshots(['v1', 'v2'])} ], [ qw(cg2 cg2) ], 'PowerStore: set deleted as a whole');
 }
 
 done_testing();

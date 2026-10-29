@@ -25,6 +25,16 @@ the readable summary.
   replica (`pvesan dr prepare-failover`).
 - Pure FlashArray: the replication schedule's own snapshots no longer show
   in the datastore's snapshot list.
+- Array snapshots on NetApp ONTAP: snapshots of the LUN's own FlexVol,
+  copies as FlexClones, restore of the FlexVol to a snapshot; ONTAP's own
+  scheduled snapshots are not listed. Single-LUN datastores only.
+- Array snapshots on IBM Spectrum Virtualize (FlashSystem, SVC): FlashCopy
+  snapshots (thin targets, no background copy), several volumes at one point
+  in time through a FlashCopy consistency group, copies fed from a snapshot
+  in the background, restore with a reverse FlashCopy.
+- Dell PowerStore: datastores on several volumes are snapshotted at one
+  point in time through a write-order consistent volume group, and restored
+  as a group.
 
 ## 1.5.0
 - Array snapshots of datastores (Pure FlashArray, INFINIDAT InfiniBox, Dell

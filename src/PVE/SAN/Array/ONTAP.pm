@@ -276,6 +276,109 @@ sub delete_flexvol {
     $self->call('DELETE', "/storage/volumes/$v->{uuid}", undef, undef) if $v;
 }
 
+# --- snapshots (FlexVol snapshots; one LUN per FlexVol) ---
+#
+# Checked against NetApp's Ansible collection: na_ontap_snapshot
+# (POST/GET/DELETE storage/volumes/<uuid>/snapshots), na_ontap_volume
+# (PATCH storage/volumes/<uuid> {restore_to.snapshot.name}) and
+# na_ontap_volume_clone (POST storage/volumes {name, clone.parent_volume.name,
+# clone.parent_snapshot.name, clone.is_flexclone, svm.name}).
+#
+# A snapshot of the FlexVol that holds only the datastore's LUN is a
+# snapshot of that LUN. A copy is a FlexClone of the FlexVol at the
+# snapshot; its lun0 gets its own serial number. Datastores on several
+# LUNs (several FlexVols) would need a consistency group: not yet.
+
+sub supports_snapshots { return 1; }
+
+sub iso_epoch {
+    my ($t) = @_;
+    my ($Y, $m, $d, $H, $M, $S, $tz) = ($t // '') =~ /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.\d+)?(Z|[+-]\d\d:?\d\d)?$/
+        or return undef;
+    require Time::Local;
+    my $e = Time::Local::timegm($S, $M, $H, $d, $m - 1, $Y);
+    if ($tz && $tz ne 'Z') {
+        my ($sign, $th, $tm) = $tz =~ /^([+-])(\d\d):?(\d\d)$/;
+        $e -= ($sign eq '+' ? 1 : -1) * ($th * 3600 + $tm * 60);
+    }
+    return $e;
+}
+
+# The FlexVol of a pvesan LUN (/vol/<flexvol>/lun0, nothing else in it).
+sub lun_flexvol {
+    my ($self, $uuid) = @_;
+    my $l = $self->volume($uuid);
+    die "ONTAP LUN $uuid is not in a FlexVol of its own (/vol/<name>/lun0) - snapshots need pvesan's layout\n"
+        if ($l->{name} // '') !~ m|^/vol/[^/]+/lun0$| || !$l->{flexvol_uuid};
+    return $l;
+}
+
+sub snapshots {
+    my ($self, $vols) = @_;
+    my @res;
+    for my $uuid (@$vols) {
+        my $l = $self->lun_flexvol($uuid);
+        for my $s (@{$self->records("/storage/volumes/$l->{flexvol_uuid}/snapshots", { fields => 'uuid,name,create_time' })}) {
+            # ONTAP's own (hourly.*, snapmirror.*) have a dot; pvesan names never do
+            next if ($s->{name} // '.') =~ /\./;
+            push @res, {
+                id => "$l->{flexvol_uuid}/$s->{uuid}",
+                name => $s->{name},
+                volume => $uuid,
+                created => iso_epoch($s->{create_time}),
+                size => $l->{capacity},
+                flexvol => $l->{flexvol},
+            };
+        }
+    }
+    return [ sort { ($a->{created} // 0) <=> ($b->{created} // 0) } @res ];
+}
+
+sub snapshot_create {
+    my ($self, $vols, $name) = @_;
+    $self->check_snapshot_args($vols, $name);
+    my $l = $self->lun_flexvol($vols->[0]);
+    $self->call('POST', "/storage/volumes/$l->{flexvol_uuid}/snapshots", undef,
+        { name => $name, svm => { name => $self->{svm} } });
+    return [ grep { $_->{name} eq $name } @{$self->snapshots($vols)} ];
+}
+
+sub snapshot_delete {
+    my ($self, $snap) = @_;
+    my ($fv, $su) = split(m|/|, $snap->{id}, 2);
+    $self->call('DELETE', "/storage/volumes/$fv/snapshots/$su", undef, undef);
+}
+
+sub snapshot_clone {
+    my ($self, $snap, $name) = @_;
+    die "invalid ONTAP volume name '$name' (letters, digits, '_')\n" if !$self->valid_name($name);
+    my $parent = $snap->{flexvol} // $self->volume($snap->{volume})->{flexvol};
+    $self->call('POST', '/storage/volumes', undef, {
+        name => $name,
+        'clone.parent_volume.name' => $parent,
+        'clone.parent_snapshot.name' => $snap->{name},
+        'clone.is_flexclone' => JSON::PP::true,
+        'svm.name' => $self->{svm},
+    });
+    my $path = "/vol/$name/lun0";
+    my ($l) = @{$self->records('/storage/luns', { 'svm.name' => $self->{svm}, name => $path, fields => "$LUN_FIELDS,enabled" })};
+    die "ONTAP: LUN $path not found in the FlexClone\n" if !$l;
+    my $v = volume_from($l);
+    my $src = $self->volume($snap->{volume});
+    die "ONTAP: the cloned LUN kept the serial number of the original - not importing it\n"
+        if defined($v->{uid}) && defined($src->{uid}) && $v->{uid} eq $src->{uid};
+    $self->call('PATCH', "/storage/luns/$v->{id}", undef, { enabled => JSON::PP::true })
+        if defined($l->{enabled}) && !$l->{enabled};
+    return $v;
+}
+
+# Whole-FlexVol restore; the FlexVol holds only this LUN.
+sub snapshot_restore {
+    my ($self, $uuid, $snap) = @_;
+    my $l = $self->lun_flexvol($uuid);
+    $self->call('PATCH', "/storage/volumes/$l->{flexvol_uuid}", undef, { 'restore_to.snapshot.name' => $snap->{name} });
+}
+
 # Deletes the LUN, and its FlexVol when pvesan created it (/vol/<x>/lun0
 # and nothing else left in it).
 sub delete_volume {

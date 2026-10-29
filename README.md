@@ -11,7 +11,7 @@ With an array driver it goes one step further, like the Pure Storage or
 INFINIDAT vSphere plugins: **one form creates the volume on the array, maps it
 to the cluster, rescans every node and builds the datastore.**
 
-> **Status: beta.** Everything below is implemented and covered by 802
+> **Status: beta.** Everything below is implemented and covered by 861
 > automated tests, and the plugin runs on a 6-node Proxmox VE 9.2 lab with
 > QLogic and Emulex HBAs. **No array driver has yet been exercised against a
 > real array.** Try each new array type with a small test datastore first, and
@@ -27,7 +27,7 @@ to the cluster, rescans every node and builds the datastore.**
 | Devices | LUNs with paths, usage, cluster-wide alias and path policy (ALUA, round robin, MRU, fixed), detach/attach |
 | Datastores | Create on one or more LUNs, grow into an expanded LUN or add an extent, rename (label or storage ID), unmount/mount per node, reclaim free space (UNMAP), delete and detach |
 | Arrays | Add an array with a pinned TLS certificate, register the cluster's hosts, **provision a datastore end to end**, grow on the array, delete including the array volume |
-| Array snapshots | Snapshot a datastore on the array (on a schedule with retention, too), mount a snapshot as a read-only copy datastore, **restore one VM** from it over its disks or into a new VM, roll a whole datastore back (Pure, InfiniBox, PowerStore) |
+| Array snapshots | Snapshot a datastore on the array (on a schedule with retention, too), mount a snapshot as a read-only copy datastore, **restore one VM** from it over its disks or into a new VM, roll a whole datastore back (Pure, InfiniBox, PowerStore, NetApp ONTAP, IBM Spectrum Virtualize) |
 | Space | Weekly automatic UNMAP reclaim per datastore; optional discard when a VM disk is deleted |
 | Per-disk volumes (**experimental**) | Storage type `fcsanvol`: every VM disk is its own array volume; snapshots, rollback, templates, linked clones and resize are array operations (Pure) |
 | Disaster recovery (**experimental**) | Replicate a datastore to a second array as one consistent group; its guest configs travel on the datastore; at the DR cluster run a **test failover** (isolated copy) or a **failover**, start guests in recovery-plan order, or import LUNs promoted by hand on any array (replication setup: Pure) |
@@ -50,8 +50,9 @@ migration, HA and Proxmox VE 9 volume-chain snapshots work as on shared LVM.
 | Hitachi VSP | `hitachi-vsp` | Configuration Manager REST |
 | Fujitsu ETERNUS DX S5 / AF S3 | `fujitsu-eternus` | ETERNUS RESTful API, port 5665 (firmware V11L40+) |
 
-Array snapshots, copies and restores work with the `pure`, `infinidat` and
-`dell-powerstore` drivers; the other drivers report them as not supported yet.
+Array snapshots, copies and restores work with the `pure`, `infinidat`,
+`dell-powerstore`, `netapp-ontap` and `ibm-sv` drivers; the other drivers
+report them as not supported yet.
 
 Every driver's requests were checked against the vendor's own SDK or tooling
 (PyPowerStore, PyU4V, InfiniSDK, Pure's generated SDK, NetApp's Ansible
@@ -120,7 +121,7 @@ pvesan array probe 10.0.0.50 --type ibm-sv          # read the certificate finge
 pvesan array add fs01 --type ibm-sv --address 10.0.0.50 --username pvesan --fingerprint 'sha256$...'
 pvesan array register-cluster fs01
 pvesan provision fs01 gold01 --pool Pool0 --size 2048
-pvesan snapshot create gold01 --name before-upgrade  # array snapshot (Pure, InfiniBox, PowerStore)
+pvesan snapshot create gold01 --name before-upgrade  # array snapshot (Pure, InfiniBox, PowerStore, ONTAP, IBM SV)
 pvesan snapshot mount gold01 before-upgrade         # read-only copy datastore to restore VMs from
 ```
 

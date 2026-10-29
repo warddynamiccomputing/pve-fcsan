@@ -243,4 +243,182 @@ sub expand_volume {
     $self->cmd('expandvdisksize', $vol, { size => "$add_bytes", unit => 'b' });
 }
 
+# --- snapshots (FlashCopy) ---
+#
+# Checked against the Storwize/SVC driver in OpenStack Cinder
+# (cinder/volume/drivers/ibm/storwize_svc/storwize_svc_common.py: mkfcmap,
+# prestartfcmap/startfcmap with -restore, mk/prestart/start/stop/rmfcconsistgrp,
+# stopfcmap -force, rmfcmap -force, lsfcmap, run_flashcopy, revert_to_snapshot).
+#
+# A snapshot is a thin target volume "pvs_<source id>_<name>" with a
+# FlashCopy mapping at copy rate 0 (no background copy). Several volumes
+# go through one FlashCopy consistency group "pvs_<name>_<first id>", which
+# starts all mappings at one point in time. A copy is a new thin volume fed
+# from the snapshot by a mapping that copies in the background and deletes
+# itself when done; a restore is a mapping from the snapshot back onto the
+# volume, started with -restore.
+
+sub supports_snapshots { return 1; }
+sub supports_group_snapshots { return 1; }
+
+sub snap_volume_name { return "pvs_$_[0]_$_[1]"; }
+
+# lsfcmap start_time: YYMMDDHHMMSS in the array's local time
+sub fc_time {
+    my ($t) = @_;
+    my ($y, $m, $d, $H, $M, $S) = ($t // '') =~ /^(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)$/ or return undef;
+    require Time::Local;
+    return Time::Local::timelocal($S, $M, $H, $d, $m - 1, 2000 + $y);
+}
+
+sub fcmaps {
+    my ($self) = @_;
+    return $self->list('lsfcmap');
+}
+
+sub snapshots {
+    my ($self, $vols) = @_;
+    my %src = map { $_ => 1 } @$vols;
+    my %size;
+    my @res;
+    for my $m (@{$self->fcmaps()}) {
+        my $sid = $m->{source_vdisk_id} // next;
+        next if !$src{$sid} || ($m->{copy_rate} // '') ne '0';
+        my ($name) = ($m->{target_vdisk_name} // '') =~ /^pvs_\Q$sid\E_(.+)$/ or next;
+        $size{$sid} //= eval { $self->volume($sid)->{capacity} };
+        push @res, {
+            id => $m->{target_vdisk_id},
+            name => $name,
+            volume => $sid,
+            created => fc_time($m->{start_time}),
+            size => $size{$sid},
+            group => (defined($m->{group_name}) && length($m->{group_name})) ? $m->{group_name} : undef,
+            fcmap => $m->{id},
+            target => $m->{target_vdisk_name},
+        };
+    }
+    return [ sort { ($a->{created} // 0) <=> ($b->{created} // 0) } @res ];
+}
+
+sub fc_status {
+    my ($self, $kind, $id) = @_;
+    my ($r) = $kind eq 'map'
+        ? @{$self->list('lsfcmap', { filtervalue => "id=$id" })}
+        : ($self->cmd('lsfcconsistgrp', $id));
+    return ($r // {})->{status} // '';
+}
+
+# prestart, wait until 'prepared', start (Cinder's _prepare_fc_map / run_flashcopy)
+sub run_fc {
+    my ($self, $kind, $id, $restore) = @_;
+    my ($pre, $start) = $kind eq 'map' ? ('prestartfcmap', 'startfcmap') : ('prestartfcconsistgrp', 'startfcconsistgrp');
+    my $opt = $restore ? { restore => JSON::PP::true } : {};
+    $self->cmd($pre, $id, $opt);
+    for (1 .. 120) {
+        my $st = $self->fc_status($kind, $id);
+        last if $st eq 'prepared';
+        $self->cmd($pre, $id, $opt) if $st eq 'stopped';
+        die "FlashCopy $kind $id: unexpected status '$st'\n" if $st ne 'preparing' && $st ne 'stopped';
+        sleep(2);
+    }
+    die "FlashCopy $kind $id did not get prepared in 4 minutes\n" if $self->fc_status($kind, $id) ne 'prepared';
+    $self->cmd($start, $id, $opt);
+}
+
+sub thin_like {
+    my ($self, $src, $name) = @_;
+    my $v = ref($src) ? $src : $self->volume($src);
+    my $r = $self->cmd('mkvolume', undef, {
+        name => $name, pool => $v->{pool}, size => "$v->{capacity}", unit => 'b', thin => JSON::PP::true,
+    });
+    return $self->volume((ref($r) eq 'HASH' ? $r->{id} : undef) // $name);
+}
+
+sub mkfcmap {
+    my ($self, $source, $target, %o) = @_;
+    my $r = $self->cmd('mkfcmap', undef, {
+        source => "$source", target => "$target",
+        copyrate => defined($o{copyrate}) ? "$o{copyrate}" : '0',
+        ($o{autodelete} ? (autodelete => JSON::PP::true) : ()),
+        ($o{consistgrp} ? (consistgrp => $o{consistgrp}) : ()),
+    });
+    my $id;
+    if (ref($r) eq 'HASH') {
+        $id = $r->{id};
+        ($id) = ($r->{message} // '') =~ /id \[(\d+)\]/ if !defined($id); # "FlashCopy Mapping, id [3], successfully created"
+    }
+    die "mkfcmap $source -> $target: no mapping id in the reply\n" if !defined($id) || !length($id);
+    return $id;
+}
+
+sub snapshot_create {
+    my ($self, $vols, $name) = @_;
+    $self->check_snapshot_args($vols, $name);
+    my $cg = @$vols > 1 ? substr("pvs_${name}_$vols->[0]", 0, 63) : undef;
+    my (@targets, @maps, $cg_made);
+    my $ok = eval {
+        if ($cg) {
+            $self->cmd('mkfcconsistgrp', undef, { name => $cg });
+            $cg_made = 1;
+        }
+        for my $vol (@$vols) {
+            my $t = $self->thin_like($vol, snap_volume_name($vol, $name));
+            push @targets, $t;
+            push @maps, $self->mkfcmap($vol, $t->{id}, copyrate => 0, consistgrp => $cg);
+        }
+        $cg ? $self->run_fc('group', $cg) : $self->run_fc('map', $maps[0]);
+        1;
+    };
+    if (!$ok) {
+        my $err = $@;
+        eval { $self->cmd('rmfcmap', $_, { force => JSON::PP::true }) } for @maps;
+        eval { $self->cmd('rmvolume', $_->{id}) } for @targets;
+        eval { $self->cmd('rmfcconsistgrp', $cg, { force => JSON::PP::true }) } if $cg_made;
+        die $err;
+    }
+    return [ grep { $_->{name} eq $name } @{$self->snapshots($vols)} ];
+}
+
+# A group goes as a whole: every mapping in it, their target volumes, then
+# the consistency group.
+sub snapshot_delete {
+    my ($self, $snap) = @_;
+    my @members = $snap->{group}
+        ? (grep { ($_->{group_name} // '') eq $snap->{group} } @{$self->fcmaps()})
+        : ({ id => $snap->{fcmap}, target_vdisk_id => $snap->{id} });
+    for my $m (@members) {
+        eval { $self->cmd('stopfcmap', $m->{id}, { force => JSON::PP::true }) };
+        $self->cmd('rmfcmap', $m->{id}, { force => JSON::PP::true });
+        $self->cmd('rmvolume', $m->{target_vdisk_id});
+    }
+    $self->cmd('rmfcconsistgrp', $snap->{group}, { force => JSON::PP::true }) if $snap->{group};
+}
+
+sub snapshot_clone {
+    my ($self, $snap, $name) = @_;
+    die "invalid volume name '$name'\n" if !$self->valid_name($name);
+    my $c = $self->thin_like($snap->{id}, $name);
+    my $map;
+    eval {
+        $map = $self->mkfcmap($snap->{id}, $c->{id}, copyrate => 50, autodelete => 1);
+        $self->run_fc('map', $map);
+    };
+    if (my $err = $@) {
+        eval { $self->cmd('rmfcmap', $map, { force => JSON::PP::true }) } if defined($map);
+        eval { $self->cmd('rmvolume', $c->{id}) };
+        die $err;
+    }
+    return $c;
+}
+
+sub snapshot_restore {
+    my ($self, $vol, $snap) = @_;
+    my $v = $self->volume($vol);
+    my $s = $self->volume($snap->{id});
+    die "volume $vol and snapshot $snap->{name} differ in size - restore refused\n"
+        if ($v->{capacity} // 0) != ($s->{capacity} // -1);
+    my $map = $self->mkfcmap($snap->{id}, $vol, copyrate => 50, autodelete => 1);
+    $self->run_fc('map', $map, 1);
+}
+
 1;
