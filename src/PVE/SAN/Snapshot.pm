@@ -28,6 +28,7 @@ use PVE::Tools;
 my $HOUR = 3600;
 my $CLAIM_TIMEOUT = 6 * $HOUR; # a claimed job whose node died is retried after this
 our $RECLAIM_INTERVAL = 7 * 24 * $HOUR;
+our $DRMETA_INTERVAL = 15 * 60; # guest configs of replicated datastores (PVE::SAN::DR)
 
 # --- pure helpers (unit tested) ---
 
@@ -80,7 +81,7 @@ sub prune_list {
     return [ grep { !$mounted->{$_->{name}} } @auto[0 .. $excess - 1] ];
 }
 
-# Datastores whose job is due at $now. $kind: 'snapshot' or 'reclaim'.
+# Datastores whose job is due at $now. $kind: 'snapshot', 'reclaim' or 'drmeta'.
 sub due_jobs {
     my ($cfg, $kind, $now) = @_;
     my @due;
@@ -92,6 +93,10 @@ sub due_jobs {
             my $sch = $ds->{snapshot_schedule} or next;
             $interval = ($sch->{interval} // 0) * $HOUR or next;
             $state = $ds->{snapshot_state} // {};
+        } elsif ($kind eq 'drmeta') {
+            $ds->{dr_meta} or next;
+            $interval = $DRMETA_INTERVAL;
+            $state = $ds->{drmeta_state} // {};
         } else {
             $ds->{auto_reclaim} or next;
             $interval = $RECLAIM_INTERVAL;

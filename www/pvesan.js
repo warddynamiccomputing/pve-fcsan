@@ -903,6 +903,19 @@ Ext.define('PVE.san.DatastoreGrid', {
 		}),
 	    },
 	    {
+		xtype: 'proxmoxButton', text: gettext('Start recovery plan'), selModel: sm, disabled: true,
+		enableFn: r => !!r.data.dr,
+		confirmMsg: r => Ext.String.format(gettext('Start the guests of {0} in recovery plan order?'), Ext.htmlEncode(r.data.storage)),
+		handler: () => PVE.san.Utils.runTask({ url: me.url(`datastores/${rec().storage}/run-plan`), done: () => me.reload() }),
+	    },
+	    {
+		xtype: 'proxmoxButton', text: gettext('Remove DR test'), selModel: sm, disabled: true,
+		enableFn: r => r.data.dr === 'test',
+		confirmMsg: r => Ext.String.format(gettext('Stop and remove the test guests of {0}, the datastore and its copied array volumes?'),
+		    Ext.htmlEncode(r.data.storage)),
+		handler: () => PVE.san.Utils.runTask({ url: me.url(`datastores/${rec().storage}/dr-cleanup`), done: () => me.reload() }),
+	    },
+	    {
 		xtype: 'proxmoxButton', text: gettext('Delete'), selModel: sm, disabled: true,
 		handler: () => Ext.create('PVE.san.DatastoreDelete', {
 		    nodename: me.nodename, record: rec(), autoShow: true, done: () => me.reload(),
@@ -1708,6 +1721,256 @@ Ext.define('PVE.san.SnapshotGrid', {
     },
 });
 
+Ext.define('PVE.san.ReplicationEnable', {
+    extend: 'Proxmox.window.Edit',
+
+    subject: gettext('Replication'),
+    width: 480,
+    isCreate: true,
+    showTaskViewer: true,
+
+    initComponent: function() {
+	let me = this;
+	me.url = `/nodes/${me.nodename}/san/datastores/${me.storage}/replication`;
+	me.method = 'POST';
+	me.items = [{
+	    xtype: 'inputpanel',
+	    onGetValues: values => PVE.san.Utils.joinValues(values),
+	    items: [
+		{ xtype: 'displayfield', fieldLabel: gettext('Datastore'), value: Ext.htmlEncode(me.storage) },
+		{
+		    xtype: 'combobox',
+		    name: 'partner',
+		    fieldLabel: gettext('Partner array'),
+		    allowBlank: false,
+		    editable: false,
+		    queryMode: 'local',
+		    displayField: 'name',
+		    valueField: 'name',
+		    store: Ext.create('Ext.data.Store', {
+			proxy: { type: 'proxmox', url: `/api2/json/nodes/${me.nodename}/san/arrays/${me.array}/replication-partners` },
+			autoLoad: true,
+		    }),
+		},
+		{ xtype: 'proxmoxintegerfield', name: 'interval', fieldLabel: gettext('Every') + ' (min)', minValue: 5,
+		    maxValue: 1440, emptyText: '60' },
+		{ xtype: 'proxmoxintegerfield', name: 'retain', fieldLabel: gettext('Keep replicas') + ' (h)', minValue: 1,
+		    maxValue: 8760, emptyText: '24' },
+		{ xtype: 'displayfield', userCls: 'pmx-hint',
+		    value: gettext('Experimental. All volumes of the datastore replicate as one consistent group. The configs of its guests are written onto the datastore every 15 minutes, so the DR site can bring them up.') },
+	    ],
+	}];
+	me.callParent();
+    },
+});
+
+Ext.define('PVE.san.ReplicationPanel', {
+    extend: 'Ext.panel.Panel',
+    alias: 'widget.pveSanReplicationPanel',
+
+    title: gettext('Disaster recovery'),
+    layout: { type: 'vbox', align: 'stretch' },
+
+    initComponent: function() {
+	let me = this;
+	let e = Ext.htmlEncode;
+	let ds = () => me.down('#dsSelect').getSelection();
+	let storage = () => me.down('#dsSelect').getValue();
+	let base = suffix => `/nodes/${me.nodename}/san/datastores/${storage()}/${suffix}`;
+	let reload = () => me.loadStatus();
+
+	let repSm = Ext.create('Ext.selection.RowModel', {});
+	let rep = () => repSm.getSelection()[0].data;
+	let arr = () => me.down('#arraySelect').getValue();
+	let repBase = suffix => `/nodes/${me.nodename}/san/arrays/${arr()}/replicas/${encodeURIComponent(rep().replica)}/${suffix}`;
+	let repStore = Ext.create('Ext.data.Store', { sorters: 'replica' });
+	let loadReplicas = () => {
+	    if (!arr()) { repStore.removeAll(); return; }
+	    Proxmox.Utils.API2Request({
+		url: `/nodes/${me.nodename}/san/arrays/${arr()}/replicas`,
+		method: 'GET',
+		success: response => repStore.loadData(response.result.data),
+		failure: response => { repStore.removeAll(); Ext.Msg.alert(gettext('Error'), response.htmlStatus); },
+	    });
+	};
+	let bringUp = mode => {
+	    let r = rep();
+	    let test = mode === 'test';
+	    Ext.Msg.prompt(test ? gettext('Test failover') : gettext('Failover'),
+		(test
+		    ? Ext.String.format(gettext('Bring up a copy of {0} ({1}) as datastore {2}-drtest with its guests isolated? Production and replication are not touched.'),
+			e(r.replica), e(r.latest || '-'), e(r.storage))
+		    : Ext.String.format(gettext('Bring up {0} ({1}) at this site as datastore {2}, with the guests\' identities kept? Make sure the primary site no longer runs them.'),
+			e(r.replica), e(r.latest || '-'), e(r.storage))) +
+		'<br><br>' + gettext('VM ID offset (empty: keep the IDs):'),
+		function(btn, offset) {
+		    if (btn !== 'ok') { return; }
+		    let params = offset ? { 'vmid-offset': offset } : {};
+		    let run = () => PVE.san.Utils.runTask({ url: repBase(mode), params, done: loadReplicas });
+		    if (test) {
+			run();
+		    } else {
+			PVE.san.Utils.confirmTyped(gettext('Failover'), gettext('This brings production up at this site.'), r.replica,
+			    () => { params.confirm = r.replica; run(); });
+		    }
+		});
+	};
+
+	me.items = [
+	    {
+		xtype: 'panel',
+		itemId: 'status',
+		title: gettext('Protected datastore (primary site)'),
+		bodyPadding: 10,
+		scrollable: true,
+		flex: 1,
+		html: gettext('Select an array datastore.'),
+		tbar: [
+		    {
+			xtype: 'combobox',
+			itemId: 'dsSelect',
+			fieldLabel: gettext('Datastore'),
+			labelWidth: 70,
+			width: 280,
+			editable: false,
+			queryMode: 'local',
+			displayField: 'storage',
+			valueField: 'storage',
+			store: Ext.create('Ext.data.Store', {
+			    proxy: { type: 'proxmox', url: `/api2/json/nodes/${me.nodename}/san/datastores` },
+			    filters: [r => !!r.data.array && !r.data.copy_of && r.data.dr !== 'test'],
+			    autoLoad: true,
+			}),
+			listeners: { change: reload },
+		    },
+		    {
+			text: gettext('Enable'),
+			iconCls: 'fa fa-exchange',
+			handler: () => storage() && Ext.create('PVE.san.ReplicationEnable', {
+			    nodename: me.nodename, storage: storage(), array: ds().data.array, autoShow: true,
+			    listeners: { destroy: reload },
+			}),
+		    },
+		    {
+			text: gettext('Replicate now'),
+			iconCls: 'fa fa-upload',
+			handler: () => storage() && PVE.san.Utils.runTask({ url: base('replicate'), done: reload }),
+		    },
+		    {
+			text: gettext('Recovery plan'),
+			iconCls: 'fa fa-list-ol',
+			handler: () => storage() && Ext.Msg.prompt(gettext('Recovery plan'),
+			    gettext('Guests in start order, each optionally with seconds to wait before the next: 101:60,102,103 (empty: no plan).'),
+			    function(btn, order) {
+				if (btn !== 'ok') { return; }
+				Proxmox.Utils.API2Request({
+				    url: base('recovery-plan'), method: 'PUT', params: { order: order || '' },
+				    success: reload,
+				    failure: response => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
+				});
+			    }, me, false, me.lastPlan || ''),
+		    },
+		    {
+			text: gettext('Disable'),
+			iconCls: 'fa fa-ban',
+			handler: () => storage() && Ext.Msg.confirm(gettext('Disable replication'),
+			    Ext.String.format(gettext('Stop replicating {0}? Replicas already on the partner stay there.'), e(storage())),
+			    btn => btn === 'yes' && PVE.san.Utils.runTask({ url: base('replication'), method: 'DELETE', done: reload })),
+		    },
+		    '->',
+		    { text: gettext('Reload'), iconCls: 'fa fa-refresh', handler: reload },
+		],
+	    },
+	    {
+		xtype: 'grid',
+		title: gettext('Replicas on this site\'s array (DR site)'),
+		flex: 1,
+		store: repStore,
+		selModel: repSm,
+		emptyText: gettext('No replicated pvesan datastores on this array.'),
+		columns: [
+		    { header: gettext('Replica'), dataIndex: 'replica', flex: 1 },
+		    { header: gettext('Source array'), dataIndex: 'source', width: 120 },
+		    { header: gettext('Datastore'), dataIndex: 'storage', width: 120 },
+		    { header: gettext('Newest'), dataIndex: 'latest', width: 170 },
+		    { header: gettext('Taken'), dataIndex: 'latest-time', width: 150, renderer: Proxmox.Utils.render_timestamp },
+		    { header: gettext('Replicas'), dataIndex: 'replicas', width: 80 },
+		],
+		tbar: [
+		    {
+			xtype: 'combobox',
+			itemId: 'arraySelect',
+			fieldLabel: gettext('Array'),
+			labelWidth: 50,
+			width: 240,
+			editable: false,
+			queryMode: 'local',
+			displayField: 'array',
+			valueField: 'array',
+			store: Ext.create('Ext.data.Store', {
+			    proxy: { type: 'proxmox', url: `/api2/json/nodes/${me.nodename}/san/arrays` },
+			    autoLoad: true,
+			}),
+			listeners: { change: loadReplicas },
+		    },
+		    {
+			xtype: 'proxmoxButton', text: gettext('Test failover'), selModel: repSm, disabled: true,
+			handler: () => bringUp('test'),
+		    },
+		    {
+			xtype: 'proxmoxButton', text: gettext('Failover'), selModel: repSm, disabled: true,
+			handler: () => bringUp('failover'),
+		    },
+		    '->',
+		    { text: gettext('Reload'), iconCls: 'fa fa-refresh', handler: loadReplicas },
+		],
+	    },
+	];
+	me.callParent();
+	me.on('activate', () => {
+	    me.down('#dsSelect').getStore().load();
+	    me.down('#arraySelect').getStore().load();
+	});
+    },
+
+    loadStatus: function() {
+	let me = this;
+	let panel = me.down('#status');
+	let storage = me.down('#dsSelect').getValue();
+	if (!storage) {
+	    return;
+	}
+	let e = Ext.htmlEncode;
+	let ts = v => (v ? Proxmox.Utils.render_timestamp(v) : '-');
+	Proxmox.Utils.API2Request({
+	    url: `/nodes/${me.nodename}/san/datastores/${storage}/replication`,
+	    method: 'GET',
+	    waitMsgTarget: panel,
+	    success: function(response) {
+		let s = response.result.data;
+		me.lastPlan = s.plan || '';
+		let out = s.enabled
+		    ? `<p>${gettext('Replicating to')} <b>${e(s.partner)}</b> ${gettext('every')} ${(s.interval || 0) / 60} min, ` +
+			`${gettext('replicas kept')} ${(s.retain || 0) / 3600} h (${gettext('array group')} ${e(s.group || '-')})</p>`
+		    : `<p>${gettext('Not replicated.')}</p>`;
+		out += `<p>${gettext('Newest complete replica')}: ${e(s['last-replica'] || '-')}, ${ts(s['last-completed'])}` +
+		    (s.lag !== undefined && s.lag !== null ? ` (${gettext('age')} ${Proxmox.Utils.format_duration_human(s.lag)})` : '') + '</p>';
+		if (s['in-progress']) {
+		    out += `<p>${gettext('In progress')}: ${e(s['in-progress'])} ${s.progress !== undefined && s.progress !== null ? Math.round(s.progress * 100) + ' %' : ''}</p>`;
+		}
+		out += `<p>${gettext('Guest configs on the datastore')}: ${ts(s['meta-written'])}` +
+		    (s['meta-error'] ? ` <i class="fa fa-times critical"></i> ${e(s['meta-error'])}` : '') + '</p>';
+		out += `<p>${gettext('Recovery plan')}: ${e(s.plan || gettext('none (guests are not started automatically)'))}</p>`;
+		if (s.error) {
+		    out += `<p><i class="fa fa-times critical"></i> ${e(s.error)}</p>`;
+		}
+		panel.update(out);
+	    },
+	    failure: response => panel.update(Ext.htmlEncode(response.htmlStatus)),
+	});
+    },
+});
+
 Ext.define('PVE.san.Panel', {
     extend: 'Ext.tab.Panel',
     alias: 'widget.pveSanPanel',
@@ -1718,6 +1981,7 @@ Ext.define('PVE.san.Panel', {
 	me.items = [
 	    { xtype: 'pveSanDatastoreGrid', nodename },
 	    { xtype: 'pveSanSnapshotGrid', nodename },
+	    { xtype: 'pveSanReplicationPanel', nodename },
 	    { xtype: 'pveSanArrayGrid', nodename },
 	    { xtype: 'pveSanDeviceGrid', nodename },
 	    { xtype: 'pveSanPathGrid', nodename },

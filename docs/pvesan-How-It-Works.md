@@ -205,6 +205,30 @@ A **snapshot set** is every array snapshot with the same pvesan name across the 
 - **Status** (asked by `pvestatd` every 10 s on every node) is the configured pool's capacity, cached for 60 s per node in `/run/pvesan`.
 - **Safety.** A LUN that is an `fcsanvol` disk shows as `vm-disk:<storage>:<disk>` in the device list and can't be used for a datastore or detached by hand.
 
+### Replication and disaster recovery (experimental)
+
+> **Experimental:** replication setup on Pure FlashArray only; not yet run on real arrays. `PVE::SAN::DR` holds the logic.
+
+**Driver primitives** (`supports_replication`): `replication_partners`, `replication_enable(vols, partner, interval, retain)`, `replication_disable`, `replicate_now(vols, name)`, `replication_status(vols)` on the source array; `replicas`, `replica_snapshots(replica)` and `replica_clone(member, name)` on the DR array. Other drivers report "replication is not supported yet".
+
+| Step | Pure FlashArray call (go-pure-client FA 2.50; target naming as in Pure's Ansible `purefa_pgsnap`) |
+| --- | --- |
+| Partners | `GET array-connections` → `remote.name`, `status`, `type = async-replication` |
+| Enable | Protection group `pvesan-<first volume>` with the volumes, `POST protection-groups/targets?group_names=<pg>&member_names=<partner>`, `PATCH protection-groups {replication_schedule: {enabled, frequency (ms)}, target_retention: {all_for_sec}}` |
+| Replicate now | `POST protection-group-snapshots?source_names=<pg>&replicate_now=true {suffix}` |
+| Status | `GET protection-group-snapshots/transfer?source_names=<pg>` → `started`, `completed`, `progress`, `data_transferred` |
+| Replicas (DR array) | `GET protection-groups` with `is_local = false`, named `<source array>:pvesan-*` |
+| Replica snapshots | Transfers with `completed` set, and the volume snapshots `<source>:<pg>.<suffix>.<volume>` |
+| Copy for the DR site | `POST volumes?names=<new> {source: {name: <volume snapshot>}}` |
+
+**Configs travel with the data.** `/etc/pve` stays at the primary site, so each protected datastore carries its guests: LV `pvesan-dr-meta` (8 MiB) on the datastore's VG holds two 4 MiB slots. Each slot is `PVESANDR1`, a JSON header `{gen, len, sha256}` and a JSON payload `{storage, written, guests: [{vmid, type, node, name, snapshots, config}], plan}`. A write goes to the older slot with the next generation, under the storage's cluster lock, followed by `fsync`; a reader takes the newest slot whose checksum matches, so a replica taken in the middle of a write still has the previous copy. `pvesan-dr.timer` (every 15 minutes, claim kind `drmeta` like the snapshot schedules) and every replicate-now write it. Only the current section of each config is stored; snapshot sections are dropped.
+
+**Bringing a replica up** (`from_replica` → `import_luns`): copy each member of the newest complete (or the named) replica snapshot to a new volume `<storage>-<timestamp>[-NN]`, map it to the host cluster, wait until every node sees it, register the multipath aliases, `vgimportclone --basevgname san_<storage>` (new PV and VG UUIDs), read the metadata, check the VM IDs against the cluster (`vmid-offset` moves them), `lvrename` disks whose VM ID changes, register an `fcsan` storage and write each guest's config on the node that runs the task. Any error before the storage is registered deactivates the VG, unmaps and deletes the copies and forgets the devices.
+
+**Test versus failover.** `dr_guest_config` rewrites the disks on the replicated datastore to the new storage ID and volume names, keeps disks on storages that exist at the DR site, empties CD-ROMs whose storage is missing and drops `parent`, `lock`, `vmstate` and the `running*` keys. A test copy also gets new MACs (Proxmox's OUI) and SMBIOS UUID, a new `vmgenid`, `-drtest` in its name, `link_down=1` on every NIC and no `onboot`. A failover keeps the identity. The datastore record keeps `dr_import {mode, source, snapshot, node, guests}`; `cleanup` refuses anything that is not a test.
+
+**Planned failover** (`prepare_failover`): shut guests down in reverse plan order (guests outside the plan first), refuse while any still runs, write the metadata, unmount the datastore cluster-wide (VG deactivated on every node), send `dr-final-<date>-<time>` and wait until the partner reports it complete.
+
 ## Consistency, locking, safety, permissions
 
 The one invariant: **only one node at a time writes LVM metadata for a shared VG, and every node sees the same device size before LVM is told about it.**
@@ -280,7 +304,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 
 **Layers.** `Util`, `Sysfs`, `Multipath` (parsing/rendering) and `LVM` (parsing) are pure Perl and read sysfs through `PVESAN_SYSFS_ROOT`, so a fixture tree replaces `/sys`. `Inventory`, `Ops`, `Config` and `Cluster` add Proxmox VE and command execution; `Datastore` and `Provision` compose them; `API2::SAN` exposes them; the CLI and GUI sit only on the API.
 
-**Tests** (`make test`, 659 checks):
+**Tests** (`make test`, 802 checks):
 
 | File | Covers |
 | --- | --- |
@@ -293,6 +317,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 | `t/68-snapshot-workflow.t` | Snapshot sets, retention, due jobs, VM config rewriting, and the snapshot, mount-copy, rollback and schedule workflows against a fake driver with the cluster steps stubbed |
 | `t/69-monitor.t` | I/O rates, path problems and learned path counts, alert differences, pool and health problems, zoning hints, new and stale hosts, `no_path_retry` rendering, the monitoring primitives of Pure, InfiniBox and PowerStore, and the monitor run (lease, registration, alerts sent once) |
 | `t/70-volumes.t` | `fcsanvol`: names and aliases, Pure's per-disk primitives, allocation with rollback on failure, the LUN limit, targeted activation, resize, snapshots, rollback, templates, linked clones, delete, and the plugin's features |
+| `t/71-dr.t` | DR metadata slots (checksum, generations, torn slots), recovery plans, VM ID offsets and disk renames, guest configs for test and failover (VMs and containers), the metadata timer job, Pure's replication primitives against a fake array, and the replicate, planned-failover, test-failover, cleanup, failover and manual-import workflows against a fake driver |
 | `t/80-integrate.t` | `pvesan-integrate` against a fake pve-manager tree: insertion point, upgrade from an older line, refusal without the anchor, exact removal, and that the patched `Nodes.pm` still loads with a broken pve-fcsan |
 | `t/90-compile.t` | Loads every module; fails on compile warnings. Uses the real Proxmox VE libraries when present, stubs otherwise |
 
@@ -334,6 +359,7 @@ The build also checks that every Proxmox function the code calls exists in the i
 | `Nodes.pm` anchor text changes | The integration can't find its insertion point | `pvesan-integrate apply` reports it and changes nothing |
 | Widget-toolkit API drift | GUI classes could change in a new Proxmox VE | Open the panel after upgrades; check the browser console |
 | Duplicate PVs while a copy is imported | Between mapping a clone and `vgimportclone`, LVM on other nodes sees two PVs with the same UUID and may refuse metadata changes on the source VG for those seconds | Mount copies outside busy periods; the task log shows the import step |
+| DR replicas never brought up on real arrays | Pure's replication calls are checked against Pure's SDK docs only; target-side naming follows Pure's Ansible module | Run a test failover with a test datastore before relying on it |
 
 **Functional limits compared with vCenter**
 
@@ -349,3 +375,4 @@ The build also checks that every Proxmox function the code calls exists in the i
 3. `datastore adopt`: convert existing `lvm` storages on SAN to `fcsan`.
 4. Array snapshots for the remaining drivers; consistency groups on PowerStore; container restore.
 5. Per-LUN path statistics and fabric events.
+6. Replication on InfiniBox and PowerStore; failback in one step; stretched clusters on active-active arrays.
