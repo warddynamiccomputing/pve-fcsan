@@ -18,6 +18,21 @@ package PVE::SAN::Array::Base;
 #   map_to_hostcluster($vol_id, $hc), unmap_from_hostcluster($vol_id, $hc)
 #   expand_volume($vol_id, $add_bytes), delete_volume($vol_id)
 #
+# Array snapshots (optional; supports_snapshots() says whether a driver has
+# them, the defaults below die with "not supported yet"):
+#
+#   snapshot_create(\@vol_ids, $name)  -> [ snapshot ]  one point in time for
+#                                         all volumes (consistency group or
+#                                         group snapshot when there are several)
+#   snapshots(\@vol_ids)               -> [ snapshot ]
+#   snapshot_delete($snapshot)         a snapshot taken as a group goes as a whole
+#   snapshot_clone($snapshot, $name)   -> volume: a new writable, unmapped volume
+#   snapshot_restore($vol_id, $snapshot)  overwrite the volume with the snapshot
+#
+#   snapshot = { id, name, volume (source volume id), created (epoch seconds),
+#                size (bytes), group (array object deleted with it, if any) }
+#   'name' is the pvesan snapshot name, the same for every member of one set.
+#
 # WWPNs are passed around as 16 upper-case hex digits without colons.
 
 use strict;
@@ -196,6 +211,41 @@ sub norm_wwpn {
     $w = uc($w // '');
     $w =~ s/[^0-9A-F]//g;
     return length($w) == 16 ? $w : undef;
+}
+
+# --- snapshots ---
+
+sub supports_snapshots { return 0; }
+
+# Can one point-in-time snapshot cover several volumes?
+sub supports_group_snapshots { return 0; }
+
+# pvesan snapshot names: valid as a Pure suffix, an InfiniBox or PowerStore
+# name part, and in an LVM VG name.
+sub valid_snapshot_name {
+    my ($class, $name) = @_;
+    return defined($name) && $name =~ /^[A-Za-z][A-Za-z0-9-]{0,39}$/ && $name !~ /-$/;
+}
+
+sub not_supported {
+    my ($self, $what) = @_;
+    die $self->description . ": $what is not supported yet by the pvesan driver\n";
+}
+
+sub snapshot_create { $_[0]->not_supported('array snapshots') }
+sub snapshots { $_[0]->not_supported('array snapshots') }
+sub snapshot_delete { $_[0]->not_supported('array snapshots') }
+sub snapshot_clone { $_[0]->not_supported('cloning array snapshots') }
+sub snapshot_restore { $_[0]->not_supported('restoring array snapshots') }
+
+# Common argument checks for snapshot_create.
+sub check_snapshot_args {
+    my ($self, $vols, $name) = @_;
+    die "invalid snapshot name '" . ($name // '') . "' (letters, digits and '-', starting with a letter)\n"
+        if !$self->valid_snapshot_name($name);
+    die "no volumes to snapshot\n" if !@$vols;
+    die $self->description . ": a consistent snapshot of several volumes is not supported yet by the pvesan driver\n"
+        if @$vols > 1 && !$self->supports_group_snapshots;
 }
 
 sub volume_name_for {
