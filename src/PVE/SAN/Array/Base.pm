@@ -76,11 +76,6 @@ sub remove_host { die $_[0]->description . ": removing hosts is not supported ye
 # 12 checks x 5 s polling interval = about one minute of queueing.
 sub default_no_path_retry { return undef; }
 
-sub not_supported {
-    my ($self, $what) = @_;
-    die $self->description . ": $what is not supported yet by the pvesan driver\n";
-}
-
 sub valid_name {
     my ($class, $name) = @_;
     return defined($name) && $name =~ /^[A-Za-z_][A-Za-z0-9_.-]*$/ && length($name) <= $class->max_name_length;
