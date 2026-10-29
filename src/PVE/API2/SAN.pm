@@ -19,6 +19,7 @@ use PVE::SAN::Datastore;
 use PVE::SAN::Provision;
 use PVE::SAN::Snapshot;
 use PVE::SAN::Inventory;
+use PVE::SAN::Monitor;
 use PVE::SAN::Multipath;
 use PVE::SAN::Ops;
 use PVE::SAN::Util qw(parse_wwid_list normalize_wwid);
@@ -173,6 +174,7 @@ $register->({
                 paths_active => { type => 'integer' },
                 paths_total => { type => 'integer' },
                 policy => { type => 'string' },
+                no_path_retry => { type => 'string', optional => 1 },
                 usage => { type => 'string' },
                 claimed => { type => 'boolean' },
                 detached => { type => 'boolean' },
@@ -376,7 +378,7 @@ $register->({
     name => 'device_set',
     path => 'devices/{wwid}',
     method => 'PUT',
-    description => "Set alias and path selection policy of a LUN cluster-wide.",
+    description => "Set alias, path selection policy and no_path_retry of a LUN cluster-wide.",
     permissions => { check => $PERM_CLUSTER },
     parameters => {
         additionalProperties => 0,
@@ -385,8 +387,10 @@ $register->({
             wwid => $wwid_opt,
             alias => { type => 'string', optional => 1, pattern => '[A-Za-z][A-Za-z0-9_.+-]{0,63}' },
             policy => { type => 'string', optional => 1, enum => PVE::SAN::Multipath::policy_names() },
+            'no-path-retry' => { type => 'string', optional => 1, pattern => '(?:\d{1,4}|queue|fail)',
+                description => "How long multipath queues I/O when every path is gone: a number of path checks (x 5 s), 'queue' (forever) or 'fail'. Default: the array's entry in multipath-tools' built-in table." },
             delete => { type => 'string', optional => 1, format => 'pve-configid-list',
-                description => "Settings to reset (alias, policy)." },
+                description => "Settings to reset (alias, policy, no-path-retry)." },
         },
     },
     returns => { type => 'string' },
@@ -394,7 +398,8 @@ $register->({
         my ($param) = @_;
         my $wwid = $wwid_param->($param);
         return $worker->('pvesandev', $wwid, sub {
-            PVE::SAN::Datastore::device_set(wwid => $wwid, map { $_ => $param->{$_} } qw(alias policy delete));
+            PVE::SAN::Datastore::device_set(wwid => $wwid, (map { $_ => $param->{$_} } qw(alias policy delete)),
+                no_path_retry => $param->{'no-path-retry'});
         });
     },
 });
@@ -665,6 +670,198 @@ $register->({
     },
 });
 
+# --- monitoring and health ---
+
+$register->({
+    name => 'datastore_array_view',
+    path => 'datastores/{storage}/array-view',
+    method => 'GET',
+    description => "The array's view of an array-linked datastore: pool capacity, volume provisioned and written space, data reduction, array health. Cached in the cluster filesystem and refreshed every 5 minutes.",
+    permissions => { check => $PERM_AUDIT },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            storage => $storage_opt,
+            refresh => { type => 'boolean', optional => 1, default => 0, description => "Read the array now instead of the cache." },
+        },
+    },
+    returns => { type => 'object', properties => {} },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Monitor::array_view(storage => $param->{storage}, refresh => $param->{refresh});
+    },
+});
+
+$register->({
+    name => 'datastore_guests',
+    path => 'datastores/{storage}/guests',
+    method => 'GET',
+    description => "Guests with disks on a datastore (the vSphere 'Related objects' view).",
+    permissions => { check => $PERM_AUDIT },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, storage => $storage_opt } },
+    returns => {
+        type => 'array',
+        items => {
+            type => 'object',
+            properties => {
+                vmid => { type => 'integer' },
+                type => { type => 'string' },
+                node => { type => 'string', optional => 1 },
+                name => { type => 'string', optional => 1 },
+                status => { type => 'string', optional => 1 },
+                disks => { type => 'string' },
+            },
+        },
+    },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Monitor::datastore_guests(storage => $param->{storage});
+    },
+});
+
+$register->({
+    name => 'guest_storage',
+    path => 'guests/{vmid}',
+    method => 'GET',
+    description => "Where a guest's disks live: datastore, volume group, LUNs and array volumes.",
+    permissions => { check => $PERM_AUDIT },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, vmid => get_standard_option('pve-vmid') } },
+    returns => {
+        type => 'array',
+        items => {
+            type => 'object',
+            properties => {
+                disk => { type => 'string' },
+                volume => { type => 'string' },
+                size => { type => 'string', optional => 1 },
+                type => { type => 'string', optional => 1 },
+                vgname => { type => 'string', optional => 1 },
+                luns => { type => 'string' },
+                wwids => { type => 'string' },
+                array => { type => 'string', optional => 1 },
+                array_volumes => { type => 'string' },
+            },
+        },
+    },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Monitor::guest_storage(vmid => $param->{vmid});
+    },
+});
+
+$register->({
+    name => 'iostats',
+    path => 'iostats',
+    method => 'GET',
+    description => "I/O rates per multipath LUN on this node, measured over a short interval (block statistics of the device-mapper map).",
+    permissions => { check => $PERM_AUDIT },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            interval => { type => 'integer', minimum => 1, maximum => 10, optional => 1, default => 2,
+                description => "Measuring interval in seconds." },
+        },
+    },
+    returns => {
+        type => 'array',
+        items => {
+            type => 'object',
+            properties => {
+                name => { type => 'string' },
+                wwid => { type => 'string' },
+                datastore => { type => 'string', optional => 1 },
+                r_iops => { type => 'number' },
+                w_iops => { type => 'number' },
+                r_bps => { type => 'integer', renderer => 'bytes' },
+                w_bps => { type => 'integer', renderer => 'bytes' },
+                r_lat_ms => { type => 'number' },
+                w_lat_ms => { type => 'number' },
+                util => { type => 'number' },
+                in_flight => { type => 'integer' },
+            },
+        },
+    },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Monitor::iostats(interval => $param->{interval});
+    },
+});
+
+$register->({
+    name => 'path_health',
+    path => 'path-health',
+    method => 'GET',
+    description => "Path check of this node: every LUN of an enabled datastore must be visible with all the paths it had before.",
+    permissions => { check => $PERM_AUDIT },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub {
+        my $h = PVE::SAN::Monitor::path_health();
+        return { node => $h->{node}, problems => [ map { $h->{problems}->{$_} } sort keys %{$h->{problems}} ],
+            expected => $h->{expected} };
+    },
+});
+
+$register->({
+    name => 'path_health_reset',
+    path => 'path-health-reset',
+    method => 'POST',
+    description => "Forget the path counts this node has learned (after an intended zoning or path change).",
+    permissions => { check => $PERM_NODE },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub { return PVE::SAN::Monitor::reset_expected(); },
+});
+
+$register->({
+    name => 'monitor_run',
+    path => 'monitor-run',
+    method => 'POST',
+    description => "Check paths on this node and, on one node, read the arrays and send alerts (called by pvesan-monitor.timer).",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub { return PVE::SAN::Monitor::run(); },
+});
+
+$register->({
+    name => 'monitor_get',
+    path => 'monitor-settings',
+    method => 'GET',
+    description => "Cluster-wide monitoring settings.",
+    permissions => { check => $PERM_AUDIT },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub { return { 'pool-threshold' => PVE::SAN::Monitor::pool_threshold() }; },
+});
+
+$register->({
+    name => 'monitor_set',
+    path => 'monitor-settings',
+    method => 'PUT',
+    description => "Set cluster-wide monitoring settings.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            'pool-threshold' => { type => 'integer', minimum => 1, maximum => 100, optional => 1,
+                description => "Alert when an array pool is fuller than this (percent, default 85)." },
+        },
+    },
+    returns => { type => 'null' },
+    code => sub {
+        my ($param) = @_;
+        PVE::SAN::Config::update(sub {
+            my ($cfg) = @_;
+            $cfg->{monitor}->{pool_threshold} = $param->{'pool-threshold'} if defined($param->{'pool-threshold'});
+        });
+        return undef;
+    },
+});
+
 # --- storage arrays ---
 
 my $array_opt = {
@@ -698,6 +895,8 @@ my $array_conn_props = {
         description => "Dell PowerMax: service level for the cluster's storage group (default: none / Optimized)." },
     'target-ports' => { type => 'string', optional => 1, pattern => '[A-Za-z0-9-]+(?:,[A-Za-z0-9-]+)*',
         description => "Hitachi VSP: array FC ports zoned to the cluster, e.g. CL1-A,CL2-A (required)." },
+    'auto-register' => { type => 'boolean', optional => 1,
+        description => "Register new cluster nodes' FC ports on this array automatically (default 1)." },
 };
 
 $register->({
@@ -914,6 +1113,68 @@ $register->({
     code => sub {
         my ($param) = @_;
         return PVE::SAN::Provision::link_datastore(array => $param->{array}, storage => $param->{storage});
+    },
+});
+
+$register->({
+    name => 'array_zoning',
+    path => 'arrays/{array}/zoning',
+    method => 'GET',
+    description => "Zoning hints: which of the array's FC target ports each node's adapters are logged in to.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, array => $array_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Monitor::zoning(array => $param->{array});
+    },
+});
+
+$register->({
+    name => 'array_hosts',
+    path => 'arrays/{array}/hosts',
+    method => 'GET',
+    description => "Hosts in the cluster's host cluster on the array; 'stale' marks hosts of nodes no longer in the cluster.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, array => $array_opt } },
+    returns => {
+        type => 'array',
+        items => {
+            type => 'object',
+            properties => {
+                host => { type => 'string' },
+                hostcluster => { type => 'string', optional => 1 },
+                wwpns => { type => 'string' },
+                stale => { type => 'boolean' },
+            },
+        },
+    },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Monitor::array_hosts(array => $param->{array});
+    },
+});
+
+$register->({
+    name => 'array_remove_host',
+    path => 'arrays/{array}/remove-host',
+    method => 'POST',
+    description => "Remove the host of a node that has left the cluster from the host cluster and delete it on the array.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            array => $array_opt,
+            host => { type => 'string', maxLength => 128, description => "Array host name (see 'hosts')." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesanremovehost', $param->{array}, sub {
+            PVE::SAN::Monitor::remove_stale_host(array => $param->{array}, host => $param->{host});
+        });
     },
 });
 

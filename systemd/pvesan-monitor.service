@@ -1,0 +1,8 @@
+[Unit]
+Description=pvesan path, array and pool health check
+After=pve-cluster.service multipathd.service
+Requires=pve-cluster.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/pvesan monitor-run

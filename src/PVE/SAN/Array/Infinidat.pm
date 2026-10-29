@@ -52,6 +52,9 @@ my %PATH = (
 );
 
 sub description { return 'INFINIDAT InfiniBox'; }
+
+# multipath-tools queues I/O on these LUNs forever when all paths are gone
+sub default_no_path_retry { return 12; }
 sub default_port { return 443; }
 sub max_name_length { return 65; }
 
@@ -206,6 +209,26 @@ sub add_host_ports {
 sub add_to_hostcluster {
     my ($self, $hcname, $host) = @_;
     $self->call('POST', sprintf($PATH{cluster_hosts}, $self->cluster_id($hcname)), undef, { id => $host->{id} });
+}
+
+# --- monitoring and lifecycle ---
+# (dataset.py fields size, used, capacity_savings; host_cluster.py
+# remove_host: DELETE clusters/<id>/hosts/<host id>)
+
+sub volume_space {
+    my ($self, $ids) = @_;
+    return [ map {
+        my ($v) = $self->call('GET', "$PATH{volumes}/$_");
+        { id => $_, provisioned => $v->{size}, written => $v->{used}, saved => $v->{capacity_savings} }
+    } @$ids ];
+}
+
+sub remove_host {
+    my ($self, $host, $hcname) = @_;
+    if (($host->{hostcluster} // '') eq $hcname) {
+        $self->call('DELETE', sprintf($PATH{cluster_hosts}, $self->cluster_id($hcname)) . "/$host->{id}", undef, undef);
+    }
+    $self->call('DELETE', "$PATH{hosts}/$host->{id}", undef, undef);
 }
 
 # --- volumes ---

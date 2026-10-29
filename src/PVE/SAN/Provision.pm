@@ -245,6 +245,8 @@ sub provision {
         PVE::SAN::Config::update(sub {
             my ($c) = @_;
             $c->{devices}->{$wwid}->{policy} //= $p{policy} // $drv->default_policy;
+            my $npr = $drv->default_no_path_retry;
+            $c->{devices}->{$wwid}->{no_path_retry} //= $npr if defined($npr);
         });
         PVE::SAN::Datastore::create(
             storage => $storeid,

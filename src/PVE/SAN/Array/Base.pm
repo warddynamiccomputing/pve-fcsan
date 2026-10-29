@@ -69,6 +69,28 @@ sub check_options {
 # Some arrays only report a volume's WWID once it is mapped (Hitachi).
 sub wwid_after_map { return 0; }
 
+# --- monitoring and lifecycle (optional; undef = not reported) ---
+#
+#   volume_space(\@vol_ids) -> [ { id, provisioned, written, reduction, saved } ]
+#   health()                -> { status => ok|warning|critical, alerts => [ { severity, summary } ] }
+#   target_ports()          -> [ WWPN ] of the array's FC target ports
+#   remove_host($host, $hcname)  take a host out of the host cluster and delete it
+
+# Every driver can report provisioned size through volume().
+sub volume_space {
+    my ($self, $ids) = @_;
+    return [ map { my $v = $self->volume($_); { id => $_, provisioned => $v->{capacity} } } @$ids ];
+}
+
+sub health { return undef; }
+sub target_ports { return undef; }
+sub remove_host { die $_[0]->description . ": removing hosts is not supported yet by the pvesan driver\n" }
+
+# no_path_retry pvesan sets for this array's LUNs when it provisions them.
+# Only where multipath-tools' built-in table queues I/O forever ("queue"):
+# 12 checks x 5 s polling interval = about one minute of queueing.
+sub default_no_path_retry { return undef; }
+
 sub valid_name {
     my ($class, $name) = @_;
     return defined($name) && $name =~ /^[A-Za-z_][A-Za-z0-9_.-]*$/ && length($name) <= $class->max_name_length;

@@ -79,6 +79,18 @@ our $cmddef = {
     'rescan-all' => [ $api, 'rescan_all', [], $node, $task ],
     sync => [ $api, 'sync', [], $node, $print_obj, $fmt ],
 
+    iostats => [ $api, 'iostats', [], $node,
+        $table->(qw(name datastore r_iops w_iops r_bps w_bps r_lat_ms w_lat_ms util)), $fmt ],
+    'path-health' => [ $api, 'path_health', [], $node, $print_obj, $fmt ],
+    'path-health-reset' => [ $api, 'path_health_reset', [], $node, $print_obj, $fmt ],
+    guest => [ $api, 'guest_storage', ['vmid'], $node,
+        $table->(qw(disk volume size type luns array array_volumes)), $fmt ],
+    monitor => {
+        show => [ $api, 'monitor_get', [], $node, $print_obj, $fmt ],
+        set => [ $api, 'monitor_set', [], $node ],
+    },
+    'monitor-run' => [ $api, 'monitor_run', [], $node, $print_obj, $fmt ], # run by pvesan-monitor.timer
+
     device => {
         add => [ $api, 'device_claim', ['wwid'], $node, $task ],
         set => [ $api, 'device_set', ['wwid'], $node, $task ],
@@ -99,6 +111,9 @@ our $cmddef = {
         reclaim => [ $api, 'datastore_reclaim', ['storage'], $node, $task ],
         delete => [ $api, 'datastore_delete', ['storage'], $node, $task ],
         'array-grow' => [ $api, 'datastore_array_grow', ['storage'], $node, $task ],
+        'array-view' => [ $api, 'datastore_array_view', ['storage'], $node, $print_obj, $fmt ],
+        guests => [ $api, 'datastore_guests', ['storage'], $node,
+            $table->(qw(vmid type name node status disks)), $fmt ],
     },
 
     array => {
@@ -112,6 +127,9 @@ our $cmddef = {
         pools => [ $api, 'array_pools', ['array'], $node, $table->(qw(name status capacity free)), $fmt ],
         'register-cluster' => [ $api, 'array_register', ['array'], $node, $task ],
         link => [ $api, 'array_link', ['array', 'storage'], $node, $print_obj, $fmt ],
+        zoning => [ $api, 'array_zoning', ['array'], $node, $print_obj, $fmt ],
+        hosts => [ $api, 'array_hosts', ['array'], $node, $table->(qw(host hostcluster wwpns stale)), $fmt ],
+        'remove-host' => [ $api, 'array_remove_host', ['array', 'host'], $node, $task ],
     },
 
     provision => [ $api, 'array_provision', ['array', 'storage'], $node, $task ],

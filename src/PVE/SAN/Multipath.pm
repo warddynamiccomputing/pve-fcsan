@@ -52,6 +52,13 @@ our $POLICIES = {
     },
 };
 
+# no_path_retry: path checks to keep queueing I/O for when every path is
+# gone (x polling_interval, 5 s by default), "queue" (forever) or "fail".
+sub valid_no_path_retry {
+    my ($v) = @_;
+    return defined($v) && $v =~ /^(?:\d{1,4}|queue|fail)$/ ? 1 : 0;
+}
+
 sub policy_names {
     return [ sort keys %$POLICIES ];
 }
@@ -83,7 +90,7 @@ sub path_states {
 }
 
 # Render the managed snippet from the cluster-wide device table
-# ({ wwid => { alias, policy, detached } }). Output is deterministic so
+# ({ wwid => { alias, policy, no_path_retry, detached } }). Output is deterministic so
 # unchanged input never rewrites the file.
 sub render_conf {
     my ($devices) = @_;
@@ -110,6 +117,7 @@ sub render_conf {
         while (my ($k, $v) = splice(@kv, 0, 2)) {
             push @lines, "\t\t$k $v";
         }
+        push @lines, "\t\tno_path_retry $d->{no_path_retry}" if valid_no_path_retry($d->{no_path_retry});
         next if @lines == 1; # nothing to override
         push @entries, "\tmultipath {\n" . join("\n", @lines) . "\n\t}\n";
     }

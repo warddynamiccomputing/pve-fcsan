@@ -17,6 +17,7 @@ my @modules = qw(
     PVE::SAN::Ops
     PVE::SAN::Cluster
     PVE::SAN::Datastore
+    PVE::SAN::Monitor
     PVE::SAN::Array
     PVE::SAN::Array::Base
     PVE::SAN::Array::IBMSV

@@ -16,6 +16,9 @@ use JSON::PP;
 use base qw(PVE::SAN::Array::Base);
 
 sub description { return 'IBM FlashSystem / Spectrum Virtualize'; }
+
+# multipath-tools queues I/O on these LUNs forever when all paths are gone
+sub default_no_path_retry { return 12; }
 sub default_port { return 7443; }
 sub default_policy { return 'alua'; }
 

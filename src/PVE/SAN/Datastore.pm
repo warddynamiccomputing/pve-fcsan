@@ -508,6 +508,8 @@ sub device_set {
     die "invalid alias '$p{alias}'\n" if defined($p{alias}) && !valid_alias($p{alias});
     die "unknown policy '$p{policy}'\n"
         if defined($p{policy}) && !$PVE::SAN::Multipath::POLICIES->{$p{policy}};
+    die "invalid no_path_retry '$p{no_path_retry}' (a number of path checks, 'queue' or 'fail')\n"
+        if defined($p{no_path_retry}) && !PVE::SAN::Multipath::valid_no_path_retry($p{no_path_retry});
 
     PVE::SAN::Config::update(sub {
         my ($cfg) = @_;
@@ -518,7 +520,8 @@ sub device_set {
             $d->{alias} = $p{alias};
         }
         $d->{policy} = $p{policy} if defined($p{policy});
-        delete $d->{$_} for grep { /^(?:alias|policy)$/ } keys %delete;
+        $d->{no_path_retry} = $p{no_path_retry} if defined($p{no_path_retry});
+        delete $d->{$_ =~ s/-/_/gr} for grep { /^(?:alias|policy|no-path-retry)$/ } keys %delete;
     });
     PVE::SAN::Cluster::on_nodes(PVE::SAN::Cluster::nodes(), 'applying multipath configuration', 'POST', 'sync');
 }

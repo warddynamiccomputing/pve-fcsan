@@ -192,6 +192,45 @@ sub add_to_hostcluster {
     $self->call('POST', '/host-groups/hosts', { group_names => $hcname, member_names => $host->{name} }, undef);
 }
 
+# --- monitoring and lifecycle ---
+# (VolumesAPI / VolumeSpaceCommon, AlertsAPI / Alert, PortsAPI / Port,
+# HostGroupsAPI HostGroupsHostsDelete, HostsAPI HostsDelete)
+
+sub volume_space {
+    my ($self, $ids) = @_;
+    return [] if !@$ids;
+    return [ map {
+        my $sp = ref($_->{space}) eq 'HASH' ? $_->{space} : {};
+        {
+            id => $_->{name},
+            provisioned => $_->{provisioned},
+            written => $sp->{virtual},
+            reduction => $sp->{data_reduction},
+        }
+    } @{$self->items('/volumes', { names => join(',', @$ids) })} ];
+}
+
+sub health {
+    my ($self) = @_;
+    my @alerts = map { { severity => $_->{severity} // 'info', summary => $_->{summary} // $_->{description} // '' } }
+        @{$self->items('/alerts', { filter => "state='open'" })};
+    my $status = (grep { $_->{severity} eq 'critical' } @alerts) ? 'critical'
+        : (grep { $_->{severity} eq 'warning' } @alerts) ? 'warning' : 'ok';
+    return { status => $status, alerts => \@alerts };
+}
+
+sub target_ports {
+    my ($self) = @_;
+    return [ sort grep { defined } map { PVE::SAN::Array::Base::norm_wwpn($_->{wwn}) } @{$self->items('/ports')} ];
+}
+
+sub remove_host {
+    my ($self, $host, $hcname) = @_;
+    $self->call('DELETE', '/host-groups/hosts', { group_names => $hcname, member_names => $host->{name} }, undef)
+        if ($host->{hostcluster} // '') eq $hcname;
+    $self->call('DELETE', '/hosts', { names => $host->{name} }, undef);
+}
+
 # --- volumes (id = volume name) ---
 
 sub volume_from {

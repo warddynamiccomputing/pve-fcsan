@@ -16,6 +16,7 @@ Proxmox.Utils.override_task_descriptions({
     pvesanmount: ['SAN Datastore', gettext('Mount')],
     pvesanreclaim: ['SAN Datastore', gettext('Reclaim space')],
     pvesandestroy: ['SAN Datastore', gettext('Delete')],
+    pvesanremovehost: ['SAN Array', gettext('Remove host of a removed node')],
     pvesanregister: ['SAN Array', gettext('Register cluster')],
     pvesanprovision: ['SAN Array', gettext('Provision datastore')],
     pvesanarraygrow: ['SAN Array', gettext('Grow datastore')],
@@ -477,6 +478,9 @@ Ext.define('PVE.san.DeviceEdit', {
 		if (!values.alias) {
 		    del.push('alias');
 		}
+		if (!values['no-path-retry']) {
+		    del.push('no-path-retry');
+		}
 		if (values.policy === 'array-default') {
 		    del.push('policy');
 		    delete values.policy;
@@ -496,6 +500,11 @@ Ext.define('PVE.san.DeviceEdit', {
 		    emptyText: gettext('none (multipath default name)') },
 		{ xtype: 'proxmoxKVComboBox', name: 'policy', fieldLabel: gettext('Path policy'),
 		    value: rec.policy || 'array-default', comboItems: PVE.san.Utils.policies },
+		{ xtype: 'textfield', name: 'no-path-retry', fieldLabel: gettext('No path retry'), value: rec.no_path_retry || '',
+		    regex: /^(?:\d{1,4}|queue|fail)$/, allowBlank: true,
+		    emptyText: gettext('array default (multipath-tools)') },
+		{ xtype: 'displayfield', userCls: 'pmx-hint',
+		    value: gettext('No path retry: how many path checks (5 s each) I/O is queued when every path is gone, "queue" to wait forever, "fail" to fail at once.') },
 	    ],
 	}];
 	me.callParent();
@@ -616,6 +625,7 @@ Ext.define('PVE.san.DeviceGrid', {
 	{ header: gettext('Size'), dataIndex: 'size', width: 90, renderer: Proxmox.Utils.render_size },
 	{ header: gettext('Paths'), dataIndex: 'paths_active', width: 80, renderer: PVE.san.Utils.renderPaths },
 	{ header: gettext('Policy'), dataIndex: 'policy', width: 110 },
+	{ header: gettext('No path retry'), dataIndex: 'no_path_retry', width: 100, hidden: true, renderer: v => v || gettext('default') },
 	{ header: gettext('Usage'), dataIndex: 'usage', width: 160 },
 	{
 	    header: gettext('Flags'),
@@ -836,6 +846,28 @@ Ext.define('PVE.san.DatastoreGrid', {
 		handler: () => open('PVE.san.DatastoreRename', { label: rec().label }),
 	    },
 	    {
+		xtype: 'proxmoxButton', text: gettext('Array view'), selModel: sm, disabled: true,
+		enableFn: r => !!r.data.array,
+		handler: () => Ext.create('PVE.san.ArrayView', { nodename: me.nodename, storage: rec().storage, autoShow: true }),
+	    },
+	    {
+		xtype: 'proxmoxButton', text: gettext('VMs'), selModel: sm, disabled: true,
+		handler: () => Ext.create('PVE.san.ListWindow', {
+		    title: Ext.String.format(gettext('Guests on {0}'), Ext.htmlEncode(rec().storage)),
+		    url: `/nodes/${me.nodename}/san/datastores/${rec().storage}/guests`,
+		    autoShow: true,
+		    emptyText: gettext('No guest has disks on this datastore.'),
+		    columns: [
+			{ header: 'ID', dataIndex: 'vmid', width: 70 },
+			{ header: gettext('Type'), dataIndex: 'type', width: 60 },
+			{ header: gettext('Name'), dataIndex: 'name', width: 140 },
+			{ header: gettext('Node'), dataIndex: 'node', width: 100 },
+			{ header: gettext('Status'), dataIndex: 'status', width: 80 },
+			{ header: gettext('Disks'), dataIndex: 'disks', flex: 1 },
+		    ],
+		}),
+	    },
+	    {
 		xtype: 'proxmoxButton', text: gettext('Unmount'), selModel: sm, disabled: true,
 		enableFn: r => !!r.data.enabled,
 		handler: () => open('PVE.san.NodesWindow', { action: 'unmount' }),
@@ -878,6 +910,183 @@ Ext.define('PVE.san.DatastoreGrid', {
 	    },
 	];
 	me.callParent();
+    },
+});
+
+// --- monitoring and health ---
+
+// Read-only window around a grid fed from one API GET.
+Ext.define('PVE.san.ListWindow', {
+    extend: 'Ext.window.Window',
+
+    modal: true,
+    width: 800,
+    height: 420,
+    layout: 'fit',
+
+    initComponent: function() {
+	let me = this;
+	me.grid = Ext.create('Ext.grid.Panel', {
+	    store: Ext.create('Ext.data.Store', {
+		proxy: { type: 'proxmox', url: `/api2/json${me.url}` },
+		autoLoad: !me.manual,
+	    }),
+	    columns: me.columns,
+	    tbar: me.tbar,
+	    emptyText: me.emptyText || gettext('No data'),
+	});
+	me.items = [me.grid];
+	delete me.tbar;
+	me.callParent();
+	Proxmox.Utils.monStoreErrors(me.grid, me.grid.getStore());
+    },
+});
+
+Ext.define('PVE.san.ArrayView', {
+    extend: 'Ext.window.Window',
+
+    modal: true,
+    width: 720,
+    bodyPadding: 10,
+    scrollable: true,
+    maxHeight: 600,
+
+    initComponent: function() {
+	let me = this;
+	me.title = Ext.String.format(gettext('Array view of {0}'), Ext.htmlEncode(me.storage));
+	me.html = gettext('Loading...');
+	me.tbar = [{
+	    text: gettext('Read array now'),
+	    iconCls: 'fa fa-refresh',
+	    handler: () => me.load(1),
+	}];
+	me.callParent();
+	me.load(0);
+    },
+
+    load: function(refresh) {
+	let me = this;
+	Proxmox.Utils.API2Request({
+	    url: `/nodes/${me.nodename}/san/datastores/${me.storage}/array-view`,
+	    method: 'GET',
+	    params: { refresh },
+	    waitMsgTarget: me,
+	    success: response => me.update(me.render(response.result.data)),
+	    failure: response => me.update(Ext.htmlEncode(response.htmlStatus)),
+	});
+    },
+
+    render: function(v) {
+	let e = Ext.htmlEncode;
+	let size = x => (x === null || x === undefined ? '-' : Proxmox.Utils.render_size(x));
+	let out = `<p>${gettext('Array')}: <b>${e(v.array)}</b>, ${gettext('read')} ${Proxmox.Utils.render_timestamp(v.time)}` +
+	    (v.cached ? ` (${gettext('cached')})` : '') + '</p>';
+	if (v.error) {
+	    return out + `<p><i class="fa fa-times critical"></i> ${e(v.error)}</p>`;
+	}
+	out += `<h3>${gettext('Pools')}</h3><table class="x-grid-item" style="width:100%">` +
+	    `<tr><th align="left">${gettext('Pool')}</th><th align="left">${gettext('Capacity')}</th>` +
+	    `<th align="left">${gettext('Free')}</th><th align="left">${gettext('Used')}</th></tr>`;
+	(v.pools || []).forEach(p => {
+	    out += `<tr><td>${e(p.name)}</td><td>${size(p.capacity)}</td><td>${size(p.free)}</td>` +
+		`<td>${p.used_pct === null || p.used_pct === undefined ? '-' : p.used_pct + ' %'}</td></tr>`;
+	});
+	out += `</table><h3>${gettext('Volumes')}</h3><table class="x-grid-item" style="width:100%">` +
+	    `<tr><th align="left">${gettext('Volume')}</th><th align="left">${gettext('Provisioned')}</th>` +
+	    `<th align="left">${gettext('Written')}</th><th align="left">${gettext('Data reduction')}</th></tr>`;
+	(v.volumes || []).forEach(x => {
+	    let red = x.reduction ? `${Number(x.reduction).toFixed(1)} : 1`
+		: x.saved ? `${size(x.saved)} ${gettext('saved')}` : '-';
+	    out += `<tr><td>${e(x.name || x.id)}</td><td>${size(x.provisioned)}</td><td>${size(x.written)}</td><td>${red}</td></tr>`;
+	});
+	out += `</table><h3>${gettext('Array health')}</h3>`;
+	if (!v.health) {
+	    out += `<p>${gettext('Not reported by this driver.')}</p>`;
+	} else {
+	    out += `<p>${PVE.san.Utils.renderState(v.health.status === 'ok' ? 'ok' : v.health.status === 'warning' ? 'degraded' : 'failed')}` +
+		` ${e(v.health.status)}</p>`;
+	    (v.health.alerts || []).forEach(a => { out += `<p>${e(a.severity)}: ${e(a.summary)}</p>`; });
+	}
+	return out;
+    },
+});
+
+Ext.define('PVE.san.HealthGrid', {
+    extend: 'Ext.grid.Panel',
+    alias: 'widget.pveSanHealthGrid',
+
+    title: gettext('Health'),
+
+    columns: [{ header: gettext('Problem on this node'), dataIndex: 'text', flex: 1 }],
+    emptyText: gettext('All datastore LUNs have all their paths.'),
+
+    initComponent: function() {
+	let me = this;
+	me.store = Ext.create('Ext.data.Store', { fields: ['text'] });
+	let api = (url, method, cb) => Proxmox.Utils.API2Request({
+	    url: `/nodes/${me.nodename}/san/${url}`,
+	    method,
+	    waitMsgTarget: me,
+	    success: cb,
+	    failure: response => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
+	});
+	me.tbar = [
+	    {
+		text: gettext('Forget path counts'),
+		handler: () => Ext.Msg.confirm(gettext('Confirm'),
+		    gettext('Forget the number of paths this node has seen per LUN? Do this after an intended zoning change.'),
+		    btn => btn === 'yes' && api('path-health-reset', 'POST', () => me.reload())),
+	    },
+	    {
+		text: gettext('Pool alert threshold'),
+		handler: () => api('monitor-settings', 'GET', response => Ext.Msg.prompt(gettext('Pool alert threshold'),
+		    gettext('Alert when an array pool is fuller than (%):'),
+		    (btn, value) => btn === 'ok' && Proxmox.Utils.API2Request({
+			url: `/nodes/${me.nodename}/san/monitor-settings`,
+			method: 'PUT',
+			params: { 'pool-threshold': value },
+			failure: r => Ext.Msg.alert(gettext('Error'), r.htmlStatus),
+		    }), me, false, response.result.data['pool-threshold'])),
+	    },
+	    '->',
+	    { text: gettext('Reload'), iconCls: 'fa fa-refresh', handler: () => me.reload() },
+	];
+	me.callParent();
+	me.on('activate', () => me.reload());
+	me.reload = () => api('path-health', 'GET',
+	    response => me.store.loadData((response.result.data.problems || []).map(text => ({ text }))));
+    },
+});
+
+Ext.define('PVE.san.IOStatsGrid', {
+    extend: 'PVE.san.BaseGrid',
+    alias: 'widget.pveSanIOStatsGrid',
+
+    title: gettext('Performance'),
+    sanPath: 'iostats',
+    stateId: 'grid-pvesan-iostats',
+    sanSorters: 'name',
+
+    columns: [
+	{ header: gettext('LUN'), dataIndex: 'name', width: 160 },
+	{ header: gettext('Datastore'), dataIndex: 'datastore', width: 120 },
+	{ header: gettext('Read IOPS'), dataIndex: 'r_iops', width: 90 },
+	{ header: gettext('Write IOPS'), dataIndex: 'w_iops', width: 90 },
+	{ header: gettext('Read'), dataIndex: 'r_bps', width: 100, renderer: v => Proxmox.Utils.render_size(v) + '/s' },
+	{ header: gettext('Write'), dataIndex: 'w_bps', width: 100, renderer: v => Proxmox.Utils.render_size(v) + '/s' },
+	{ header: gettext('Read latency'), dataIndex: 'r_lat_ms', width: 100, renderer: v => `${v} ms` },
+	{ header: gettext('Write latency'), dataIndex: 'w_lat_ms', width: 100, renderer: v => `${v} ms` },
+	{ header: gettext('Busy'), dataIndex: 'util', width: 70, renderer: v => `${v} %` },
+	{ header: gettext('In flight'), dataIndex: 'in_flight', width: 70 },
+    ],
+
+    initComponent: function() {
+	let me = this;
+	me.callParent();
+	// measured over 2 s on this node; refresh while the tab is shown
+	me.on('activate', () => { me.timer = setInterval(() => me.reload(), 10000); });
+	me.on('deactivate', () => clearInterval(me.timer));
+	me.on('destroy', () => clearInterval(me.timer));
     },
 });
 
@@ -1214,6 +1423,56 @@ Ext.define('PVE.san.ArrayGrid', {
 		handler: () => Ext.create('PVE.san.ArrayStatus', { nodename: me.nodename, arrayId: rec().array, autoShow: true }),
 	    },
 	    {
+		xtype: 'proxmoxButton', text: gettext('Zoning'), selModel: sm, disabled: true,
+		handler: () => Proxmox.Utils.API2Request({
+		    url: me.url(`arrays/${rec().array}/zoning`),
+		    method: 'GET',
+		    waitMsgTarget: me,
+		    success: function(response) {
+			let d = response.result.data;
+			let rows = (d.adapters || []).map(a => Ext.htmlEncode(`${a.node} ${a.adapter} (${a.adapter_wwpn || '?'}): ${a.seen} / ${a.expected}`));
+			let hints = (d.hints || []).map(h => `<i class="fa fa-exclamation-triangle warning"></i> ${Ext.htmlEncode(h)}`);
+			Ext.Msg.alert(gettext('Zoning'),
+			    Ext.String.format(gettext('Array ports ({0}): {1}'), d.source === 'array' ? gettext('from the array') : gettext('from LUN paths'),
+				Ext.htmlEncode(d.expected || '-')) +
+			    '<br><br>' + rows.join('<br>') + '<br><br>' + (hints.length ? hints.join('<br>') : gettext('Every adapter reaches every array port.')));
+		    },
+		    failure: response => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
+		}),
+	    },
+	    {
+		xtype: 'proxmoxButton', text: gettext('Hosts'), selModel: sm, disabled: true,
+		handler: function() {
+		    let arrayId = rec().array;
+		    let win = Ext.create('PVE.san.ListWindow', {
+			title: Ext.String.format(gettext('Hosts on array {0}'), Ext.htmlEncode(arrayId)),
+			url: `/nodes/${me.nodename}/san/arrays/${arrayId}/hosts`,
+			columns: [
+			    { header: gettext('Host'), dataIndex: 'host', width: 160 },
+			    { header: gettext('Host cluster'), dataIndex: 'hostcluster', width: 130 },
+			    { header: 'WWPNs', dataIndex: 'wwpns', flex: 1 },
+			    { header: gettext('Removed node'), dataIndex: 'stale', width: 110, renderer: Proxmox.Utils.format_boolean },
+			],
+			tbar: [{
+			    text: gettext('Remove host'),
+			    handler: function() {
+				let sel = win.grid.getSelection()[0];
+				if (!sel || !sel.data.stale) {
+				    Ext.Msg.alert(gettext('Error'), gettext('Select a host marked as a removed node.'));
+				    return;
+				}
+				PVE.san.Utils.runTask({
+				    url: me.url(`arrays/${arrayId}/remove-host`),
+				    params: { host: sel.data.host },
+				    done: () => win.grid.getStore().load(),
+				});
+			    },
+			}],
+		    });
+		    win.show();
+		},
+	    },
+	    {
 		xtype: 'proxmoxButton', text: gettext('Provision datastore'), iconCls: 'fa fa-magic', selModel: sm, disabled: true,
 		handler: () => Ext.create('PVE.san.Provision', {
 		    nodename: me.nodename, arrayId: rec().array, autoShow: true, listeners: after,
@@ -1463,6 +1722,8 @@ Ext.define('PVE.san.Panel', {
 	    { xtype: 'pveSanDeviceGrid', nodename },
 	    { xtype: 'pveSanPathGrid', nodename },
 	    { xtype: 'pveSanAdapterGrid', nodename },
+	    { xtype: 'pveSanIOStatsGrid', nodename },
+	    { xtype: 'pveSanHealthGrid', nodename },
 	];
 	me.callParent();
     },

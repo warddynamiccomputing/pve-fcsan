@@ -7,6 +7,7 @@ SBINDIR := $(DESTDIR)/usr/sbin
 LIBDIR := $(DESTDIR)/usr/share/$(PACKAGE)
 WWWDIR := $(DESTDIR)/usr/share/pve-manager/js
 UNITDIR := $(DESTDIR)/lib/systemd/system
+TEMPLATEDIR := $(DESTDIR)/usr/share/pve-manager/templates/default
 BASHCOMPDIR := $(DESTDIR)/usr/share/bash-completion/completions
 
 SAN_MODULES := $(wildcard src/PVE/SAN/*.pm)
@@ -30,6 +31,9 @@ install:
 	install -m 0644 systemd/pvesan-snapshot.service systemd/pvesan-snapshot.timer $(UNITDIR)/
 	install -m 0644 systemd/pvesan-reclaim.service systemd/pvesan-reclaim.timer $(UNITDIR)/
 	install -D -m 0644 completion/pvesan $(BASHCOMPDIR)/pvesan
+	install -m 0644 systemd/pvesan-monitor.service systemd/pvesan-monitor.timer $(UNITDIR)/
+	install -d $(TEMPLATEDIR)
+	install -m 0644 templates/pvesan-alert-subject.txt.hbs templates/pvesan-alert-body.txt.hbs $(TEMPLATEDIR)/
 
 # unit tests + compile check; runs anywhere with Perl (PVE modules are stubbed when absent)
 test:

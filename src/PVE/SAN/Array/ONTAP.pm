@@ -28,6 +28,9 @@ use JSON::PP ();
 use base qw(PVE::SAN::Array::Base);
 
 sub description { return 'NetApp ONTAP'; }
+
+# multipath-tools queues I/O on these LUNs forever when all paths are gone
+sub default_no_path_retry { return 12; }
 sub options { return { svm => 1 }; }
 sub max_name_length { return 64; }
 
