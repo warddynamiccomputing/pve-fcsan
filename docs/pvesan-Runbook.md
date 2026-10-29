@@ -1,6 +1,6 @@
 # pve-fcsan Runbook
 
-Version 1.4.0
+Version 1.5.0
 
 ## Purpose and scope
 
@@ -112,7 +112,7 @@ make deb
 **Install** on each node, one at a time:
 
 ```bash
-apt install ./pve-fcsan_1.4.0_all.deb
+apt install ./pve-fcsan_1.5.0_all.deb
 /usr/share/pve-fcsan/pvesan-integrate status
 pvesan adapters
 ```

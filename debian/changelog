@@ -1,3 +1,21 @@
+pve-fcsan (1.5.0) trixie; urgency=medium
+
+  * Array snapshots of datastores (Pure FlashArray, InfiniBox, PowerStore):
+    take, list and delete; mount a snapshot as a read-only copy datastore
+    and restore one VM from it; roll a whole datastore back in place.
+  * Snapshot schedules with retention (pvesan-snapshot.timer), weekly
+    automatic space reclaim (pvesan-reclaim.timer) and the fc-discard
+    storage option.
+  * Monitoring: array view per datastore, I/O rates per LUN, datastore to
+    VM lists, path health and array alerts through Proxmox VE notification
+    targets (pvesan-monitor.timer), no_path_retry per LUN.
+  * Node lifecycle: new nodes registered on arrays automatically; hosts of
+    removed nodes can be removed. Zoning hints per node.
+  * Experimental: storage type fcsanvol, one array volume per VM disk
+    (Pure FlashArray only, raw disks only).
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Thu, 29 Oct 2026 12:00:00 +0000
+
 pve-fcsan (1.4.0) trixie; urgency=medium
 
   * New array driver: Fujitsu ETERNUS DX S5 / AF S3 (and DX8100/8900 S4)
