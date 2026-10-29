@@ -11,7 +11,7 @@ With an array driver it goes one step further, like the Pure Storage or
 INFINIDAT vSphere plugins: **one form creates the volume on the array, maps it
 to the cluster, rescans every node and builds the datastore.**
 
-> **Status: beta.** Everything below is implemented and covered by 356
+> **Status: beta.** Everything below is implemented and covered by 436
 > automated tests, and the plugin runs on a 6-node Proxmox VE 9.2 lab with
 > QLogic and Emulex HBAs. **No array driver has yet been exercised against a
 > real array.** Try each new array type with a small test datastore first, and
@@ -23,6 +23,7 @@ to the cluster, rescans every node and builds the datastore.**
 | --- | --- |
 | Adapters | FC (and iSCSI) HBAs with WWPN, link state, speed, fabric, targets |
 | Rescan | One node or the whole cluster; optional LIP; picks up new LUNs and grown LUNs |
+| Monitoring | Array view per datastore (pool capacity, written space, data reduction, array alerts), IOPS / throughput / latency per LUN, datastore → VMs and VM → LUN, path-health alerts through Proxmox notification targets, zoning hints, new nodes registered on the arrays automatically |
 | Devices | LUNs with paths, usage, cluster-wide alias and path policy (ALUA, round robin, MRU, fixed), detach/attach |
 | Datastores | Create on one or more LUNs, grow into an expanded LUN or add an extent, rename (label or storage ID), unmount/mount per node, reclaim free space (UNMAP), delete and detach |
 | Arrays | Add an array with a pinned TLS certificate, register the cluster's hosts, **provision a datastore end to end**, grow on the array, delete including the array volume |
@@ -141,6 +142,7 @@ Server Solutions; check `pvesan-integrate status` after upgrades.
 | `src/PVE/CLI/pvesan.pm`, `bin/pvesan` | CLI |
 | `src/PVE/SAN/*.pm` | discovery, multipath, LVM, cluster config, node ops, orchestration, provisioning |
 | `src/PVE/SAN/Array/*.pm` | array drivers (shared base + one per platform) |
+| `systemd/pvesan-monitor.*`, `templates/` | health timer and its notification templates |
 | `www/pvesan.js` | GUI extension |
 | `bin/pvesan-integrate` | API/GUI registration in pve-manager |
 | `systemd/pvesan-sync.service` | applies cluster SAN config at boot |

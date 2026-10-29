@@ -3,6 +3,25 @@
 The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
+## Unreleased
+- Array view per datastore: pool capacity and use, volume provisioned and
+  written space, data reduction and array alerts (Pure; InfiniBox and
+  PowerStore partly), cached in the cluster filesystem.
+- I/O rates per LUN (IOPS, throughput, latency, utilisation) from the
+  multipath maps' block statistics: Performance tab, `pvesan iostats`.
+- Datastore → VMs list and the datastore, LUNs and array volume of each disk
+  of a guest (`pvesan datastore guests`, `pvesan guest <vmid>`).
+- Path health on every node (missing LUN, dead, fewer paths than seen
+  before) and array problems (pool over threshold, array alerts, failed
+  array calls), sent once through Proxmox VE notification targets by the
+  new `pvesan-monitor.timer`; Health tab.
+- `no_path_retry` per LUN; LUNs provisioned on IBM FlashSystem, NetApp ONTAP
+  and InfiniBox get 12 checks (about one minute) instead of queueing
+  forever. Per-array defaults are documented.
+- New nodes are registered on arrays automatically (`auto-register`); hosts
+  of removed nodes can be removed (Pure, InfiniBox, PowerStore).
+- Zoning hints: which array ports each node's adapters are logged in to.
+
 ## 1.4.0
 - New array driver: Fujitsu ETERNUS DX S5 / AF S3 (`fujitsu-eternus`), using the
   ETERNUS RESTful API on port 5665 (firmware V11L40 or later).

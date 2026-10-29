@@ -61,6 +61,7 @@ flowchart TB
 | CLI | `PVE/CLI/pvesan.pm`, `/usr/sbin/pvesan` | `PVE::CLIHandler` maps each command onto an API method |
 | GUI | `/usr/share/pve-manager/js/pvesan.js` | One `<script>` line in `index.html.tpl`; an Ext `override` of `PVE.panel.Config` adds the panel to the node's Disks group |
 | Integration | `/usr/share/pve-fcsan/pvesan-integrate` | Run by `postinst`, re-run by a dpkg trigger when pve-manager replaces either file |
+| Health timer | `pvesan-monitor.timer`, `pvesan-alert-*.txt.hbs` | `pvesan monitor-run` every 5 minutes on every node; alerts through `PVE::Notify` |
 | Boot sync | `pvesan-sync.service` | `pvesan sync` after `pve-cluster` and `multipathd`, before `pvestatd` and guests |
 | Array drivers | `PVE/SAN/Array/*.pm` | Called only by provisioning workflows |
 
@@ -73,8 +74,10 @@ State lives in three places, each with one owner; each node renders a fourth fro
 | Storage registry | `/etc/pve/storage.cfg` (pmxcfs) | `fcsan` entry: `vgname`, `shared`, `nodes`, `disable`, `fc-wwids`, `fc-autorescan` | Proxmox VE storage API (`PVE::API2::Storage::Config`) |
 | pvesan cluster DB | `/etc/pve/pvesan/config.json` (pmxcfs) | Per WWID: `alias`, `policy`, `detached`, `datastore`. Per datastore: `label`, linked `array` and `volumes`. Per array: type, address, user, fingerprint, vendor settings | `PVE::SAN::Config::update` under the `pvesan` cfs domain lock |
 | Array secrets | `/etc/pve/priv/pvesan/<array>.pw` | Password or API token | Root only |
+| Monitor cache | `/etc/pve/pvesan/monitor.json` (pmxcfs) | Array views per datastore, array problems, lease, member list per array | `PVE::SAN::Monitor` under the `pvesan` domain lock |
 | LVM metadata | On the LUNs | VG, PVs, LVs | LVM commands, only under `cluster_lock_storage` |
 | Rendered, per node | `/etc/multipath/conf.d/pvesan.conf`, `/etc/multipath/wwids`, LVM devices file | Aliases, policies, blacklist of detached WWIDs, claimed WWIDs | `PVE::SAN::Ops::sync` |
+| Node health state | `/var/lib/pvesan/health.json` | Highest path count seen per LUN, last reported problems | `PVE::SAN::Monitor` on that node |
 
 **Why a separate cluster DB?** Aliases and path policies apply to LUNs, not storages: a LUN can have a policy before it belongs to a datastore, and a detached LUN belongs to none. `storage.cfg` has no place for that, so pvesan keeps a small JSON file next to it on pmxcfs.
 
@@ -174,6 +177,7 @@ The one invariant: **only one node at a time writes LVM metadata for a shared VG
 | Lock | Taken through | Guards | Held for |
 | --- | --- | --- | --- |
 | Cluster storage lock | `PVE::Storage::Plugin->cluster_lock_storage($id, 1, 60, ...)` | `pvcreate`/`vgextend`, `pvresize`, reclaim LV create/remove; Proxmox VE's own volume allocation takes it too | Seconds |
+| Monitor lease | A `{ node, time }` entry in `monitor.json`, written under the `pvesan` domain lock | Which node reads the arrays this run | One timer interval |
 | storage.cfg lock | `PVE::Storage::lock_storage_config` | ID rename (section move plus `vgrename`) | Seconds |
 | pvesan domain lock | `cfs_lock_domain('pvesan')` | Read-modify-write of `config.json` | Milliseconds |
 
@@ -192,6 +196,38 @@ pmxcfs aborts code holding a lock for more than 60 s, so every slow step (node f
 
 **Permissions.** API calls are `protected` (handled by pvedaemon as root) and `proxyto => 'node'`. Reads need `Sys.Audit` on the node; node-local changes `Sys.Modify` on the node; anything cluster-wide or array-related `Sys.Modify` on `/` and `Datastore.Allocate` on `/storage`. Those privileges allow root-level storage changes on every node, the same as Proxmox VE's own storage management.
 
+## Monitoring and health
+
+`PVE::SAN::Monitor` gives the vSphere plugins' storage health view inside Proxmox VE, without a separate daemon.
+
+**One timer, two roles.** `pvesan-monitor.timer` runs `monitor-run` on every node every 5 minutes. Every node checks its own paths. Then the node takes a lease in `/etc/pve/pvesan/monitor.json` (under the `pvesan` domain lock; a lease older than 4 minutes is taken over) and, if it got it, reads every array-linked datastore's array view, registers new nodes and evaluates array-level problems. Only one node talks to the arrays per run.
+
+**Array view.** `collect_view` asks the driver for `volume_space` (provisioned, written, reduction or capacity saved), `pools` (filtered to the pools of the datastore's volumes) and `health`. Every driver answers provisioned size and pools through its existing primitives; written space, reduction and health come from drivers that implement them:
+
+| Primitive | Pure FlashArray | INFINIDAT InfiniBox | Dell PowerStore |
+| --- | --- | --- | --- |
+| `volume_space` | `GET volumes?names=` → `space.virtual`, `space.data_reduction` | `GET volumes/<id>` → `used`, `capacity_savings` | `GET volume/<id>?select=id,size,logical_used` (falls back without `logical_used` before PowerStoreOS 3) |
+| `health` | `GET alerts?filter=state='open'` | — | — |
+| `target_ports` | `GET ports` → `wwn` | — | — |
+| `remove_host` | `DELETE host-groups/hosts`, `DELETE hosts` | `DELETE clusters/<id>/hosts/<host>`, `DELETE hosts/<id>` | `PATCH host_group/<id> {remove_host_ids}`, `DELETE host/<id>` |
+| Checked against | go-pure-client FA 2.50 docs (VolumeSpaceCommon, Alert, Port, HostGroupsAPI, HostsAPI) | InfiniSDK (`dataset.py`, `host_cluster.py`) | PyPowerStore (`utils/constants.py`, `provisioning.py`) |
+
+The view is cached in `monitor.json` with its time; the API serves the cache when it is under 15 minutes old.
+
+**Path health.** `path_problems` is a pure function: the node's devices, the LUNs it must see (`watched_luns`: LUNs of enabled datastores whose node list includes the node, detached ones excluded) and the highest path count seen per LUN (kept in `/var/lib/pvesan/health.json`). A LUN is missing, dead (no active path) or degraded (fewer active paths than ever seen). Learning the maximum catches paths that disappeared entirely after `dev_loss_tmo`, which a plain "active < total" check misses; `path-health-reset` forgets it.
+
+**Alerts.** Each run compares the problem set with the previous one (node problems in the node's state file, array problems in `monitor.json`) and sends only the difference: new problems as `warning`, resolved ones as `info`, through `PVE::Notify::notify` with the `pvesan-alert` templates and the field `type=pvesan`, so the admin's matchers and targets decide where they go. A Proxmox VE without the notification system only gets the journal line.
+
+**I/O rates.** `iostats` reads `/sys/block/dm-N/stat` of every multipath map twice, `interval` seconds apart, and derives IOPS, bytes per second, average latency per I/O (`ms` delta / `ios` delta) and utilisation (`io_ticks`). No device-mapper statistics regions are created, so nothing is left behind on the node.
+
+**Relations.** `datastore_guests` reads every guest config on pmxcfs (`guest_refs`), so guests on offline nodes are listed too; `guest_storage` maps each disk of one guest to its datastore, VG, LUN aliases and array volumes from `storage.cfg` and the cluster DB.
+
+**Node lifecycle.** `unregistered_nodes` (none of a node's WWPNs belongs to any array host) runs only when the cluster's member list differs from the one stored per array, so a stable cluster costs no array calls; the registration itself is the normal idempotent `ensure_hostcluster`, limited to the new nodes. `stale_hosts` marks hosts in the cluster's host cluster that are not named after a member and own none of the online nodes' ports; removal is refused while any node is offline, because an offline node's host would look the same.
+
+**Zoning hints.** `zoning_rows` compares, per node and adapter, the online FC target logins (`fc_remote_ports`) with the array's ports: from `target_ports` where the driver has it, otherwise the union of the target ports any node uses for the array's LUNs.
+
+**no_path_retry.** The device record can carry `no_path_retry`, rendered into the LUN's `multipath {}` section after the policy settings. Drivers whose arrays multipath-tools queues forever (`IBM 2145`, `NETAPP LUN`, `NFINIDAT InfiniBox`) return 12 from `default_no_path_retry`, which provisioning records for new LUNs.
+
 ## Development and testing
 
 **Design decisions**
@@ -209,7 +245,7 @@ pmxcfs aborts code holding a lock for more than 60 s, so every slow step (node f
 
 **Layers.** `Util`, `Sysfs`, `Multipath` (parsing/rendering) and `LVM` (parsing) are pure Perl and read sysfs through `PVESAN_SYSFS_ROOT`, so a fixture tree replaces `/sys`. `Inventory`, `Ops`, `Config` and `Cluster` add Proxmox VE and command execution; `Datastore` and `Provision` compose them; `API2::SAN` exposes them; the CLI and GUI sit only on the API.
 
-**Tests** (`make test`, 356 checks):
+**Tests** (`make test`, 436 checks):
 
 | File | Covers |
 | --- | --- |
@@ -221,8 +257,9 @@ pmxcfs aborts code holding a lock for more than 60 s, so every slow step (node f
 | `t/60…66-*.t` | Every array driver against a fake array that keeps state (`t/lib/FakeArray.pm`): auth, request bodies, registration, full volume lifecycle, error formats |
 | `t/80-integrate.t` | `pvesan-integrate` against a fake pve-manager tree: insertion point, upgrade from an older line, refusal without the anchor, exact removal, and that the patched `Nodes.pm` still loads with a broken pve-fcsan |
 | `t/90-compile.t` | Loads every module; fails on compile warnings. Uses the real Proxmox VE libraries when present, stubs otherwise |
+| `t/69-monitor.t` | I/O rates, path problems and learned path counts, alert differences, pool and health problems, zoning hints, new and stale hosts, `no_path_retry` rendering, the monitoring primitives of Pure, InfiniBox and PowerStore, and the monitor run (lease, registration, alerts sent once) |
 
-The build also checks that every Proxmox function the code calls exists in the installed libraries, that the REST router accepts all 36 API paths, that `pvesan.js` parses, and that every module is in the package. CI runs the tests on every push.
+The build also checks that every Proxmox function the code calls exists in the installed libraries, that the REST router accepts every API path, that `pvesan.js` parses, and that every module is in the package. CI runs the tests on every push.
 
 **Validation so far.** The plugin runs on a 6-node Proxmox VE 9.2 cluster with QLogic and Emulex HBAs: install, integration, services, storage plugin, API, CLI, GUI asset, local and cluster rescan, refusal of invisible LUNs and CLI exit codes are verified there, and every array driver's first call was checked over pinned TLS. That lab work found and fixed seven bugs that unit tests could not see (an API path clash, a non-existent helper call, arguments lost in the cluster fan-out, a packaging omission, among others). Array drivers have not yet run against real arrays.
 

@@ -13,6 +13,8 @@ A pvesan *datastore* is a shared thick LVM volume group on one or more multipath
 | Rescan Storage | Adapters → Rescan / Rescan all nodes | `pvesan rescan` / `pvesan rescan-all` |
 | Storage Adapters view | Adapters tab | `pvesan adapters` |
 | Storage Devices view | Devices tab | `pvesan devices` |
+| Datastore capacity, performance, related VMs | Datastores → Array view / VMs; Performance tab | `pvesan datastore array-view`, `pvesan iostats`, `pvesan datastore guests` |
+| Storage alarms, path health | Health tab; Proxmox notifications | `pvesan path-health` |
 | Paths view, path state | Paths tab | `pvesan paths` |
 | Edit Multipathing (Fixed / MRU / Round Robin) | Devices → Properties → Path policy | `pvesan device set <wwid> --policy ...` |
 | Device display name | Devices → Properties → Alias | `pvesan device set <wwid> --alias ...` |
@@ -121,6 +123,7 @@ Installing does four things:
 1. Installs the storage plugin to `/usr/share/perl5/PVE/Storage/Custom/FCSANPlugin.pm`.
 2. Adds one marked line each to `PVE/API2/Nodes.pm` (API) and `index.html.tpl` (GUI). If `Nodes.pm` doesn't compile with the line added, the change is reverted. The API line loads pve-fcsan inside an `eval`: if pve-fcsan ever fails to load, only the SAN API and panel go away, and the rest of the Proxmox VE API keeps working.
 3. Enables `pvesan-sync.service`. At boot it applies the cluster-wide aliases, policies and detached-LUN list before guests start.
+   It also enables `pvesan-monitor.timer` (health checks and alerts, see Monitoring and health) and installs the `pvesan-alert` notification templates in `/usr/share/pve-manager/templates/default/`.
 4. Reloads `pvedaemon`, `pveproxy` and `pvestatd`.
 
 **Upgrading Proxmox VE.** A pve-manager upgrade replaces `Nodes.pm` and `index.html.tpl`. A dpkg trigger re-runs the integration and reloads the services on its own. After any Proxmox VE upgrade, check:
@@ -338,6 +341,81 @@ journalctl -u pvesan-sync -u multipathd -b
 
 **Lost `/etc/pve/pvesan/config.json`.** Datastores keep working, because LVM metadata lives on the LUNs. Aliases and policies fall back to multipath defaults, and arrays must be added again. Re-run `pvesan device set` for each LUN, or restore the file from a backup of `/etc/pve`.
 
+## Monitoring and health
+
+`pvesan-monitor.timer` runs `pvesan monitor-run` on every node every 5 minutes. Each node checks its own paths; one node (it takes a lease in `/etc/pve/pvesan/monitor.json`) reads every array, caches what it read in the same file and registers new nodes. Problems are sent through Proxmox VE's notification system (**Datacenter → Notifications**: mail, webhook, Gotify, ...) when they appear and again when they are resolved, never every 5 minutes. To route or silence them, add a matcher on the field `type` = `pvesan`. They are also written to the journal (`journalctl -u pvesan-monitor`).
+
+### H1. Array view of a datastore
+
+**Datastores → Array view** (`pvesan datastore array-view gold01`) shows, for an array-linked datastore:
+
+- the pool(s) of its volume(s): capacity, free and used percentage;
+- each volume: provisioned size, written data and data reduction;
+- the array's open alerts and overall state.
+
+The view comes from the cache (at most 15 minutes old); **Read array now** (`--refresh 1`) reads the array at once. What each driver reports:
+
+| Driver | Pool capacity / free | Provisioned | Written | Data reduction | Array health |
+| --- | --- | --- | --- | --- | --- |
+| `pure` | yes | yes | yes | yes (ratio) | yes (open alerts) |
+| `infinidat` | yes | yes | yes | capacity saved | not yet |
+| `dell-powerstore` | not reported by the API pvesan uses | yes | yes (PowerStoreOS 3+) | not yet | not yet |
+| other drivers | as their pool list | yes | not yet | not yet | not yet |
+
+A pool fuller than the threshold (85 % by default) raises an alert: `pvesan monitor set --pool-threshold 90`, or **Health → Pool alert threshold**.
+
+### H2. Performance per LUN
+
+**Performance** (`pvesan iostats`) shows, for every multipath LUN on the node you are looking at: read and write IOPS, throughput, average latency, how busy the LUN was and the I/O in flight. The numbers come from the block statistics of each device-mapper multipath map, measured over 2 seconds (`--interval 1..10`); the tab refreshes every 10 seconds while it is open. They are the node's view; the array's own statistics are not read yet.
+
+### H3. Which VMs are on a datastore, and which LUN a VM is on
+
+- **Datastores → VMs** (`pvesan datastore guests gold01`) lists every VM and container with disks on the datastore, its node, state and disks, from the guest configs of all nodes.
+- `pvesan guest 101` lists each disk of a guest with its datastore, volume group, LUN(s) and array volume(s).
+
+### H4. Path health and alerts
+
+Every node checks that each LUN of each enabled datastore it should see is present and has all its paths. It remembers the highest path count it has seen per LUN, so a path that disappeared entirely (not just failed) is still reported. Problems:
+
+| Problem | Meaning |
+| --- | --- |
+| `LUN ... is not visible` | The datastore's LUN is missing on this node |
+| `has no active path` | All paths are down; I/O is queued or fails, depending on `no_path_retry` |
+| `has N of M paths active` | A fabric, HBA port or array port is down, or a path was removed |
+| `pool ... is N% full` | An array pool passed the threshold |
+| `array ... reports warning/critical` | The array has open alerts (Pure) |
+| `array ... could not be read` | An array API call failed (credentials, certificate, network) |
+| `registering new nodes ... failed` | See H5 |
+
+**Health** (`pvesan path-health`) shows the current problems of a node. After an intended change that removes paths (rezoning, fewer HBA ports), click **Forget path counts** (`pvesan path-health-reset`) on each node so the lower count becomes normal.
+
+### H5. Nodes joining and leaving
+
+- **Join:** when the cluster's membership changes, the monitor registers the FC ports of every node that has no host on the array yet, on every array with `auto-register` (the default), exactly as **Register cluster** would. A node whose ports already belong to a host is left alone. Turn it off per array with `pvesan array set fs01 --auto-register 0`.
+- **Leave:** after `pvecm delnode`, **Arrays → Hosts** (`pvesan array hosts fs01`) marks hosts in the cluster's host cluster that belong to no cluster member as **Removed node**. **Remove host** (`pvesan array remove-host fs01 <host>`) takes such a host out of the host cluster and deletes it on the array. pvesan refuses while any node is offline (its host could not be told apart) and for any host that is not marked. Supported on `pure`, `infinidat` and `dell-powerstore`; on other arrays remove the host in the array's GUI.
+
+### H6. Zoning hints
+
+**Arrays → Zoning** (`pvesan array zoning fs01`) compares the array's FC target ports with the ports each node's adapters are logged in to, and names what is missing: an adapter logged in to none of the array's ports (zone missing on that fabric), or a node that reaches some array ports but not others. The array's ports come from the array where the driver can read them (`pure`); otherwise from the target ports that any node uses to reach the array's LUNs. pvesan does not change the switches.
+
+### H7. All paths down: no_path_retry
+
+`no_path_retry` decides what multipath does with I/O when every path to a LUN is gone: keep it queued for that many path checks (5 s each by default), queue it forever (`queue`), or fail it at once (`fail`). Queueing forever means a VM hangs until a path returns, and on an HA cluster the node does not fence itself. pvesan leaves multipath-tools' built-in value for each array unless that value is "queue forever"; for those arrays it sets **12** (about one minute) on LUNs it provisions:
+
+| Array | multipath-tools built-in `no_path_retry` | Set by pvesan on provisioned LUNs |
+| --- | --- | --- |
+| IBM FlashSystem / Spectrum Virtualize (2145) | `queue` | 12 |
+| NetApp ONTAP (`NETAPP LUN`) | `queue` | 12 |
+| INFINIDAT InfiniBox | `queue` | 12 |
+| Pure FlashArray | not set (no queueing) | — |
+| Dell PowerStore | 3 | — |
+| Dell PowerMax / VMAX | 6 | — |
+| NetApp E-Series | 30 | — |
+| Hitachi VSP (`OPEN-`) | 10 | — |
+| Fujitsu ETERNUS DX | 10 | — |
+
+The built-in values are from multipath-tools' hardware table and change between versions; `multipath -t` shows the ones in force on a node. Set or change the value per LUN in **Devices → Properties → No path retry** or with `pvesan device set <wwid> --no-path-retry 12` (`--delete no-path-retry` returns to the built-in value); it applies on every node.
+
 ## CLI and API reference
 
 Each `pvesan` command calls the API method in the same row, so `pvesan help <command>` and the API viewer show the same parameters. List commands accept `--output-format json|yaml|text`. Cluster tasks exit non-zero when they fail.
@@ -352,8 +430,14 @@ Each `pvesan` command calls the API method in the same row, so `pvesan help <com
 | `pvesan rescan` | `POST rescan` | node | `--lip`, `--resize` |
 | `pvesan rescan-all` | `POST rescan-all` | cluster task | `--lip` |
 | `pvesan sync` | `POST sync` | node | |
+| `pvesan iostats` | `GET iostats` | node | `--interval` |
+| `pvesan path-health` | `GET path-health` | node | |
+| `pvesan path-health-reset` | `POST path-health-reset` | node | |
+| `pvesan guest <vmid>` | `GET guests/{vmid}` | cluster view | |
+| `pvesan monitor show` / `set` | `GET` / `PUT monitor-settings` | cluster | `--pool-threshold` |
+| `pvesan monitor-run` | `POST monitor-run` | timer | |
 | `pvesan device add <wwid>` | `POST devices/{wwid}/claim` | cluster task | `--alias` |
-| `pvesan device set <wwid>` | `PUT devices/{wwid}` | cluster task | `--alias`, `--policy`, `--delete` |
+| `pvesan device set <wwid>` | `PUT devices/{wwid}` | cluster task | `--alias`, `--policy`, `--no-path-retry`, `--delete` |
 | `pvesan device detach <wwid>` | `POST devices/{wwid}/detach` | cluster task | |
 | `pvesan device attach <wwid>` | `POST devices/{wwid}/attach` | cluster task | |
 | `pvesan device refresh <wwid>` | `POST devices/{wwid}/refresh` | node | |
@@ -362,6 +446,8 @@ Each `pvesan` command calls the API method in the same row, so `pvesan help <com
 | `pvesan datastore create <id>` | `POST datastores` | cluster task | `--devices`, `--label`, `--vgname`, `--content`, `--nodes`, `--saferemove`, `--force` |
 | `pvesan datastore extend <id>` | `POST datastores/{id}/extend` | cluster task | `--add-devices`, `--devices`, `--force` |
 | `pvesan datastore array-grow <id>` | `POST datastores/{id}/array-grow` | cluster task | `--size <GiB>` |
+| `pvesan datastore array-view <id>` | `GET datastores/{id}/array-view` | cluster view | `--refresh` |
+| `pvesan datastore guests <id>` | `GET datastores/{id}/guests` | cluster view | |
 | `pvesan datastore rename <id>` | `POST datastores/{id}/rename` | cluster task | `--label`, `--new-id`, `--rename-vg` |
 | `pvesan datastore unmount <id>` | `POST datastores/{id}/unmount` | cluster task | `--nodes` |
 | `pvesan datastore mount <id>` | `POST datastores/{id}/mount` | cluster task | `--nodes` |
@@ -369,13 +455,16 @@ Each `pvesan` command calls the API method in the same row, so `pvesan help <com
 | `pvesan datastore delete <id>` | `DELETE datastores/{id}` | cluster task | `--destroy-data`, `--detach`, `--delete-volume` |
 | `pvesan array list` | `GET arrays` | cluster view | |
 | `pvesan array probe <address>` | `POST array-probe` | node | `--port`, `--type` |
-| `pvesan array add <id>` | `POST arrays` | cluster | `--type`, `--address`, `--port`, `--username`, `--fingerprint`, `--hostcluster`, vendor settings |
+| `pvesan array add <id>` | `POST arrays` | cluster | `--type`, `--address`, `--port`, `--username`, `--fingerprint`, `--hostcluster`, `--auto-register`, vendor settings |
 | `pvesan array set <id>` | `PUT arrays/{id}` | cluster | as add, `--delete` |
 | `pvesan array remove <id>` | `DELETE arrays/{id}` | cluster | |
 | `pvesan array status <id>` | `GET arrays/{id}/status` | cluster view | |
 | `pvesan array pools <id>` | `GET arrays/{id}/pools` | — | |
 | `pvesan array register-cluster <id>` | `POST arrays/{id}/register-cluster` | cluster task | |
 | `pvesan array link <id> <storage>` | `POST arrays/{id}/link` | cluster | |
+| `pvesan array zoning <id>` | `GET arrays/{id}/zoning` | cluster view | |
+| `pvesan array hosts <id>` | `GET arrays/{id}/hosts` | cluster view | |
+| `pvesan array remove-host <id> <host>` | `POST arrays/{id}/remove-host` | cluster task | |
 | `pvesan provision <array> <storage>` | `POST arrays/{id}/provision` | cluster task | `--pool`, `--size`, `--thin`, `--volume`, `--label`, `--content`, `--policy` |
 
 There are also two internal steps, `POST devices/{wwid}/detach-local` and `POST vg-deactivate`. Cluster tasks call them on each node; don't call them by hand.
