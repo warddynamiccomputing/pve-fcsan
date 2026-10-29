@@ -4,6 +4,14 @@ The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
 ## Unreleased
+- New array driver: HPE Primera, Alletra 9000 and 3PAR StoreServ (`hpe-3par`)
+  through the Web Services API (WSAPI). The cluster is a host set of hosts
+  with persona 2 (Generic-ALUA), each volume is exported to the host set
+  with one LUN, and pools are CPGs. Array snapshots are virtual copies;
+  datastores on several volumes are snapshotted through a volume set,
+  copies are online physical copies and restore promotes the virtual copy.
+  Requests checked against HPE's python-3parclient and OpenStack Cinder's
+  3PAR driver.
 - Experimental: replication and disaster recovery. Replicate an array
   datastore to a partner array as one consistent group (`pvesan dr enable`,
   Pure FlashArray protection group targets with a replication schedule and

@@ -11,7 +11,7 @@ With an array driver it goes one step further, like the Pure Storage or
 INFINIDAT vSphere plugins: **one form creates the volume on the array, maps it
 to the cluster, rescans every node and builds the datastore.**
 
-> **Status: beta.** Everything below is implemented and covered by 861
+> **Status: beta.** Everything below is implemented and covered by 943
 > automated tests, and the plugin runs on a 6-node Proxmox VE 9.2 lab with
 > QLogic and Emulex HBAs. **No array driver has yet been exercised against a
 > real array.** Try each new array type with a small test datastore first, and
@@ -49,15 +49,16 @@ migration, HA and Proxmox VE 9 volume-chain snapshots work as on shared LVM.
 | NetApp E-Series | `netapp-eseries` | SANtricity Web Services |
 | Hitachi VSP | `hitachi-vsp` | Configuration Manager REST |
 | Fujitsu ETERNUS DX S5 / AF S3 | `fujitsu-eternus` | ETERNUS RESTful API, port 5665 (firmware V11L40+) |
+| HPE Primera / Alletra 9000 / 3PAR StoreServ | `hpe-3par` | Web Services API (WSAPI), port 443 (3PAR: 8080) |
 
 Array snapshots, copies and restores work with the `pure`, `infinidat`,
-`dell-powerstore`, `netapp-ontap` and `ibm-sv` drivers; the other drivers
+`dell-powerstore`, `netapp-ontap`, `ibm-sv` and `hpe-3par` drivers; the other drivers
 report them as not supported yet.
 
 Every driver's requests were checked against the vendor's own SDK or tooling
 (PyPowerStore, PyU4V, InfiniSDK, Pure's generated SDK, NetApp's Ansible
-collections, OpenStack Cinder's Hitachi driver, Fujitsu's ETERNUS RESTful API
-Reference).
+collections, OpenStack Cinder's Hitachi and 3PAR drivers, HPE's python-3parclient,
+Fujitsu's ETERNUS RESTful API Reference).
 
 **A driver is optional.** If your storage team creates and maps the LUNs, or
 you do it in the array's own GUI, add no array at all: pvesan discovers the
