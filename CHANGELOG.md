@@ -35,6 +35,11 @@ the readable summary.
 - Dell PowerStore: datastores on several volumes are snapshotted at one
   point in time through a write-order consistent volume group, and restored
   as a group.
+- New array driver: HPE Alletra 5000 / 6000 and Nimble Storage (`hpe-nimble`),
+  using the NimOS REST API on port 5392. The cluster is one FC initiator
+  group; volumes are presented through access control records. Array
+  snapshots, copies (clones) and restores; datastores on several volumes are
+  snapshotted through a volume collection and its snapshot collections.
 
 ## 1.5.0
 - Array snapshots of datastores (Pure FlashArray, INFINIDAT InfiniBox, Dell

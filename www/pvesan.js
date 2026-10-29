@@ -108,6 +108,14 @@ Ext.define('PVE.san.Utils', {
 	    roleHint: gettext('Needs controller firmware V11L40 or later with the RESTful API enabled and port 5665 open in the array firewall settings. Use a user with the Admin or StorageAdmin role. pvesan registers each node HBA port as an FC host and connects every volume to all of them; enable host affinity on the CA ports zoned to the cluster. Pools are thin provisioning pools.'),
 	    certHint: gettext('ETERNUS Web GUI: the RESTful API uses the Web GUI SSL certificate.'),
 	},
+	'hpe-nimble': {
+	    name: 'HPE Alletra 5000/6000 (Nimble)',
+	    port: 5392,
+	    username: true,
+	    secretLabel: gettext('Password'),
+	    roleHint: gettext('Use a NimOS user with the Power User or Administrator role (REST API on port 5392). The cluster is one FC initiator group holding every node WWPN; thin volumes have reserve 0, thick ones reserve 100%. Datastores on several volumes are snapshotted through a volume collection.'),
+	    certHint: gettext('NimOS GUI: the management certificate under Administration > Security.'),
+	},
     },
 
     optionFields: [
