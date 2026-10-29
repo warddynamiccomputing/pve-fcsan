@@ -159,7 +159,7 @@ my (@log, @cmds, @storage_created, %nodes_calls);
     *PVE::SAN::Cluster::on_nodes = sub { push @{$nodes_calls{$_[3]}}, $_[4]; return {} };
     *PVE::SAN::Cluster::guest_refs = sub { [] };
     *PVE::SAN::Cluster::running_guests = sub { [] };
-    *PVE::SAN::Provision::wait_visible = sub { push @log, "visible $_[1]" };
+    *PVE::SAN::Provision::wait_visible = sub { push @log, "visible @{$_[0]} $_[1]" };
     *PVE::SAN::Datastore::register_devices = sub { push @log, "register $_[1] @{$_[2]}"; [ map { "/dev/mapper/x$_" } 0 .. $#{$_[2]} ] };
     *PVE::SAN::Datastore::storage = sub { { vgname => "san_$_[0]", type => 'fcsan' } };
     *PVE::SAN::Datastore::storage_nodes = sub { [ 'n1', 'n2' ] };
@@ -200,7 +200,9 @@ select($old);
 is($copy, 'gold-copy', 'copy name');
 is_deeply($drv->{clones}, [ 'gold-copy-00', 'gold-copy-01' ], 'one clone per volume');
 is_deeply($drv->{maps}, [ 'c-gold-copy-00', 'c-gold-copy-01' ], 'clones mapped to the cluster');
-is_deeply([ grep { /^visible/ } @log ], [ 'visible 3600aagold-copy-00', 'visible 3600aagold-copy-01' ], 'waited for both LUNs');
+is_deeply([ grep { /^visible/ } @log ], [ 'visible n1 3600aagold-copy-00', 'visible n1 3600aagold-copy-01',
+    'visible n1 n2 3600aagold-copy-00', 'visible n1 n2 3600aagold-copy-01' ],
+    'this node sees the clones first, the others only after the import');
 ok((grep { $_ eq 'register gold-copy 3600aagold-copy-00 3600aagold-copy-01' } @log), 'devices registered under the copy');
 is($cmds[0], 'vgimportclone --basevgname san_gold-copy /dev/mapper/x0 /dev/mapper/x1', 'volume group imported under a new name');
 is($cmds[1], 'lvchange --permission r san_gold-copy', 'copy volumes made read-only');

@@ -177,6 +177,25 @@ is_deeply([ PVE::SAN::Volume::status('vols-nocache-' . $$, $scfg) ], [ 1000, 400
 eval { PVE::SAN::Volume::activate('vols', $scfg, 'vm-100-disk-0') };
 is_deeply([ @local[0 .. 2] ], [ 'rescan lun 10', 'sync', "wait $wwid" ], 'only the disk\'s LUN number is scanned');
 
+# deactivation releases the LUN on this node; an open map is kept
+{
+    no warnings qw(redefine once);
+    my @detached;
+    local *PVE::SAN::Ops::detach_device = sub { push @detached, $_[0]; die "device is in use\n" if $_[0] eq 'busy' };
+    PVE::SAN::Volume::deactivate('vols', $scfg, 'vm-100-disk-0');
+    is_deeply(\@detached, [ $wwid ], 'LUN released on this node after the VM stopped');
+    my $warned = '';
+    local $SIG{__WARN__} = sub { $warned .= $_[0] };
+    local *PVE::SAN::Volume::record = sub { ('busy', {}) };
+    PVE::SAN::Volume::deactivate('vols', $scfg, 'vm-100-disk-0');
+    like($warned, qr/LUN kept on this node - device is in use/, 'a map still in use only warns');
+    @detached = ();
+    $P->deactivate_volume('vols', { %$scfg, 'fc-keep-luns' => 1 }, 'vm-100-disk-0');
+    is_deeply(\@detached, [], 'fc-keep-luns keeps the LUN');
+    $P->deactivate_volume('vols', $scfg, 'vm-100-disk-0', 'snap1');
+    is_deeply(\@detached, [], 'snapshots are never released');
+}
+
 # resize
 @local = ();
 is(PVE::SAN::Volume::resize('vols', $scfg, 'vm-100-disk-0', 20 * $GIB), 20 * $GIB, 'resized');
