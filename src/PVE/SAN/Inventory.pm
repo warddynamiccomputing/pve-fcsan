@@ -112,6 +112,7 @@ sub devices {
         my $dc = $cfg->{devices}->{$d->{wwid}} // {};
         $d->{alias} = $dc->{alias};
         $d->{policy} = $dc->{policy} // 'array-default';
+        $d->{no_path_retry} = $dc->{no_path_retry};
         $d->{detached} = $dc->{detached} ? 1 : 0;
         $d->{claimed} = ($claimed->{$d->{wwid}} || $d->{map}) ? 1 : 0;
         $d->{name} = $d->{map} // $d->{paths}->[0]->{dev};

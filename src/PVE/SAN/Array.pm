@@ -33,6 +33,7 @@ our $OPTION_KEYS = {
     'srp' => 'srp',
     'slo' => 'slo',
     'target-ports' => 'target_ports',
+    'auto-register' => 'auto_register', # not a driver setting: pvesan-monitor registers new nodes
 };
 
 sub types {

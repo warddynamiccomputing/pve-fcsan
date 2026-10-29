@@ -135,6 +135,30 @@ sub add_to_hostcluster {
     }
 }
 
+# --- monitoring and lifecycle ---
+# (logical_used is selectable on PowerStoreOS 3+, see the volume detail
+# queries in PyPowerStore utils/constants.py; modify_host_group
+# {remove_host_ids}; delete_host: DELETE /host/<id>)
+
+sub volume_space {
+    my ($self, $ids) = @_;
+    return [ map {
+        my $id = $_;
+        my $v = eval { $self->call('GET', "/volume/$id", { select => 'id,size,logical_used' }) }
+            // $self->call('GET', "/volume/$id", { select => 'id,size' }); # older PowerStoreOS
+        { id => $id, provisioned => $v->{size}, written => $v->{logical_used} }
+    } @$ids ];
+}
+
+sub remove_host {
+    my ($self, $host, $hcname) = @_;
+    if (($host->{hostcluster} // '') eq $hcname) {
+        my $gid = $self->group_id($hcname) // die "PowerStore host group '$hcname' not found\n";
+        $self->call('PATCH', "/host_group/$gid", undef, { remove_host_ids => [ $host->{id} ] });
+    }
+    $self->call('DELETE', "/host/$host->{id}", undef, undef);
+}
+
 sub volume_from {
     my ($v) = @_;
     return {
