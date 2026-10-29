@@ -191,6 +191,18 @@ A **snapshot set** is every array snapshot with the same pvesan name across the 
 
 **Schedules.** The cluster DB holds `snapshot_schedule = { interval, keep }`, `auto_reclaim` and per-job state `{ last, error, claimed }`. `pvesan-snapshot.timer` (every 15 minutes) and `pvesan-reclaim.timer` (weekly) fire on every node. Each run reads the config without a lock and returns at once if nothing is due; otherwise it claims the due jobs under the `pvesan` domain lock (a claim older than 6 hours is taken over, in case a node died mid-run), runs them outside the lock and records the result. Retention removes only `auto-<date>-<time>` snapshots beyond `keep`, never manual or mounted ones.
 
+### Per-disk array volumes (`fcsanvol`)
+
+`PVE::Storage::Custom::FCSANVolPlugin` is a second storage type that maps the Proxmox storage plugin API onto array volumes; `PVE::SAN::Volume` holds the logic so it is unit tested without Proxmox.
+
+- **Identity without an array call.** The multipath alias of a disk is `<storage>-<volname>`, so `path()` (called on every VM start and by `qemu_blockdev_options`) is `/dev/mapper/<alias>` and needs neither the array nor the cluster DB. The array volume is `<storage prefix>-<volname>`, so `list_images` needs only the array. The cluster DB keeps per WWID `{ alias, datastore, disk, lun, array_volume }`; there is no LVM layer and no metadata on the LUNs.
+- **Targeted rescan.** `alloc_image` creates, maps and records the volume with its LUN number but scans nothing. `activate_volume` on the node that runs the VM writes `- - <lun>` to each FC/iSCSI host's `scan` (`Ops::rescan_lun`), runs the normal `sync` and waits for the map. This keeps rescans cheap on nodes with hundreds of LUNs.
+- **Scale guard.** `fc-max-luns` (default 255) refuses new disks before LUN-per-host limits (for example 256 host LUNs without flat addressing on some arrays) are reached.
+- **Snapshots and clones** reuse the phase 2 primitives (`snapshot_create`, `snapshots`, `snapshot_delete`, `snapshot_restore`, `snapshot_clone`) plus `copy_volume`, `rename_volume`, `host_lun`, `volumes_named` and `volume_by_name` (`supports_disk_volumes`). On Pure: `GET volumes?destroyed=false` / `filter=name='...'`, `GET connections` → `lun`, `PATCH volumes {name}`, `POST volumes {source}` (go-pure-client FA 2.50 VolumesAPI, VolumePatch, ConnectionsAPI, Connection).
+- **Delete** marks the WWID detached cluster-wide and removes its paths on every node before the volume is disconnected, so no node is left with dead paths.
+- **Status** (asked by `pvestatd` every 10 s on every node) is the configured pool's capacity, cached for 60 s per node in `/run/pvesan`.
+- **Safety.** A LUN that is an `fcsanvol` disk shows as `vm-disk:<storage>:<disk>` in the device list and can't be used for a datastore or detached by hand.
+
 ## Consistency, locking, safety, permissions
 
 The one invariant: **only one node at a time writes LVM metadata for a shared VG, and every node sees the same device size before LVM is told about it.**
@@ -277,6 +289,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 | `t/50-cluster.t` | The exact `pvesh` command lines of the fan-out |
 | `t/60…66-*.t`, `t/67-snapshots.t` | Every array driver against a fake array that keeps state (`t/lib/FakeArray.pm`): auth, request bodies, registration, full volume lifecycle, error formats |
 | `t/68-snapshot-workflow.t` | Snapshot sets, retention, due jobs, VM config rewriting, and the snapshot, mount-copy, rollback and schedule workflows against a fake driver with the cluster steps stubbed |
+| `t/70-volumes.t` | `fcsanvol`: names and aliases, Pure's per-disk primitives, allocation with rollback on failure, the LUN limit, targeted activation, resize, snapshots, rollback, templates, linked clones, delete, and the plugin's features |
 | `t/80-integrate.t` | `pvesan-integrate` against a fake pve-manager tree: insertion point, upgrade from an older line, refusal without the anchor, exact removal, and that the patched `Nodes.pm` still loads with a broken pve-fcsan |
 | `t/90-compile.t` | Loads every module; fails on compile warnings. Uses the real Proxmox VE libraries when present, stubs otherwise |
 | `t/69-monitor.t` | I/O rates, path problems and learned path counts, alert differences, pool and health problems, zoning hints, new and stale hosts, `no_path_retry` rendering, the monitoring primitives of Pure, InfiniBox and PowerStore, and the monitor run (lease, registration, alerts sent once) |
