@@ -256,7 +256,7 @@ With an array driver, pvesan drives the array itself, the way the Pure Storage a
 **One-time setup**
 
 1. On the array, create a dedicated API user with the role listed for your array below.
-2. Zone every node's FC ports to the array. **SAN → Adapters** lists the WWPNs.
+2. Zone every node's FC ports to the array. **SAN → Adapters** lists the WWPNs. For an iSCSI array, follow P19 instead of zoning.
 3. In **SAN → Arrays → Add**, choose the type, enter an ID, the management address and the credentials, plus any extra settings the type needs.
 4. Click **Fetch** and compare the SHA-256 certificate fingerprint with the one in the array's management GUI. Confirm it only if it matches. pvesan pins this fingerprint and refuses any other certificate. The connection and login are tested before anything is saved, and the secret is stored root-only in `/etc/pve/priv/pvesan/`.
 5. Select the array, open **Registration**, and click **Register cluster on array**. pvesan creates one host per node with its WWPNs (or reuses a host that already owns them) and puts them in a host cluster named after the Proxmox cluster, unless you set another name. Every node should then show **Registered**.
@@ -299,7 +299,7 @@ pvesan provision fs01 gold01 --pool Pool0 --size 2048 --thin 1 --label "Gold 01"
 | INFINIDAT InfiniBox | `infinidat` | 443 | User, Pool Admin or Admin | — | Cluster | Pool | Thin or thick |
 | Dell PowerStore | `dell-powerstore` | 443 | User, Storage Administrator | — | Host group | `default` | Always thin |
 | Dell PowerMax / VMAX | `dell-powermax` | 8443 (Unisphere) | Unisphere user, StorageAdmin | `--system-id` (Symmetrix ID), `--portgroup` (required); `--srp`, `--slo` | Host group, storage group `<cluster>_SG`, masking view `<cluster>_MV` | The SRP of `<cluster>_SG` | Create a port group of the zoned array FC ports first |
-| NetApp ONTAP (AFF / ASA / FAS) | `netapp-ontap` | 443 | Cluster or SVM admin with REST access | `--svm` (required) | FCP igroup | Aggregate | One FlexVol (`/vol/<name>/lun0`) per datastore; names use `_` instead of `-` |
+| NetApp ONTAP (AFF / ASA / FAS) | `netapp-ontap` | 443 | Cluster or SVM admin with REST access | `--svm` (required) | igroup (FCP, iSCSI or mixed) | Aggregate | One FlexVol (`/vol/<name>/lun0`) per datastore; names use `_` instead of `-` |
 | NetApp E-Series | `netapp-eseries` | 8443 | Storage admin | `--system-id` (default `1`) | Host group | Pool / DDP | Thick volumes only; names up to 30 characters |
 | Hitachi VSP | `hitachi-vsp` | 443 (embedded) or your Configuration Manager port | Storage Administrator (Provisioning) | `--target-ports` (required, e.g. `CL1-A,CL2-A`); `--system-id` | One host group per target port (host mode LINUX/IRIX) | DP pool | LU path on every target port; WWID known after mapping |
 | Fujitsu ETERNUS DX S5 / AF S3 | `fujitsu-eternus` | 5665 (enable the RESTful API and open the port in the firewall settings) | User with the Admin or StorageAdmin role | — | One FC host per HBA port (`<node>_<n>`) | Thin provisioning pool (TPP) | Firmware V11L40 or later; host affinity enabled on the CA ports; the cluster's hosts must not share a LUN group with other hosts |
@@ -427,6 +427,64 @@ A failover keeps the guests' identities (MACs, UUIDs, VM IDs unless you set an o
 
 **Limits.** Replicas are crash-consistent. Only the current state of a guest is brought up, not its Proxmox snapshots. HA resources, firewall settings outside the guest config, backup jobs and pool membership stay at the primary site and need to be set up at the DR site. Disks on other storages are kept only if that storage exists at the DR site. A CD-ROM image that doesn't exist there is emptied.
 
+### P19. iSCSI arrays
+
+pvesan provisions on iSCSI arrays the same way as on FC: it registers each node's iSCSI initiator name on the array instead of (or as well as) its WWPNs, and logs every node in to the array's target portals. Every driver except `fujitsu-eternus` supports it; that one says "iSCSI host registration is not supported yet".
+
+**Before you start**
+
+1. Give every node an interface on the array's iSCSI network (ideally two, on separate subnets or VLANs, for multipath) and check that each node can reach every portal (`ping`, or `nc -zv <portal> 3260`).
+2. `open-iscsi` is installed on Proxmox VE by default. Each node's initiator name is in `/etc/iscsi/initiatorname.iscsi`, and `pvesan iscsi status` shows it with the node's sessions. Initiator names must be unique: if nodes were cloned from one image, give each its own (`echo "InitiatorName=$(iscsi-iname)" > /etc/iscsi/initiatorname.iscsi`, then `systemctl restart iscsid`) before registering.
+3. If the array needs CHAP, set it in `/etc/iscsi/iscsid.conf` on every node first. pvesan doesn't manage CHAP secrets.
+4. Array specifics:
+   - **NetApp ONTAP:** the SVM needs the iSCSI service and data LIFs with the `data_iscsi` service. The igroup is created with protocol `iscsi` (or `mixed` with `--protocol both`). An existing `fcp` igroup can't take iSCSI initiators: ONTAP doesn't allow changing an igroup's protocol, so use another `--hostcluster` name.
+   - **Hitachi VSP:** list the iSCSI target ports in `--target-ports`. pvesan creates the host group (an iSCSI target) on each port and registers the initiator names in it (`host-iscsis`). With `--protocol both`, FC ports get WWPNs and iSCSI ports get initiator names.
+   - **Dell PowerMax:** `--portgroup` must be a port group of iSCSI target ports. pvesan reads their IP addresses and target IQNs from it.
+   - **IBM Spectrum Virtualize:** portals are the nodes' host-attach Ethernet ports (`lsportip`, or `lsip` portset `portset0` on 8.4.2 and later).
+
+**Register and log in**
+
+```bash
+pvesan array add fa01 --type pure --address 192.0.2.20 --fingerprint 'sha256$...' --protocol iscsi
+# or, for an array that is already added:
+pvesan array set fa01 --protocol iscsi        # 'both' for FC and iSCSI hosts
+pvesan array register-cluster fa01
+pvesan array status fa01
+```
+
+`register-cluster` creates or updates the host objects with each node's initiator name and puts them in the host cluster. Then every node:
+
+1. runs `iscsiadm -m discovery -t sendtargets -p <portal>` for each portal the array reports,
+2. sets `node.startup=automatic` on every discovered node record,
+3. logs in (`iscsiadm -m node -T <iqn> -p <portal> --login`) wherever it has no session yet.
+
+Each step is idempotent: run it again at any time. In the GUI, **Arrays → Registration** has **Register cluster on array** and **iSCSI login**.
+
+If the driver can't list the portals, or you want other ones, give them yourself:
+
+```bash
+pvesan array iscsi-login fa01 --portals 192.0.2.21,192.0.2.22
+pvesan iscsi login 192.0.2.21                # this node only
+pvesan iscsi status                          # initiator, sessions, recorded portals
+```
+
+Then provision as in P12: `pvesan provision fa01 gold01 --pool default --size 2048`. Check that every LUN has a path through each portal (`pvesan devices`, `multipath -ll`).
+
+**At boot, and for new nodes**
+
+Every portal a node logs in to is recorded in `/etc/pve/pvesan/config.json` (`iscsi.portals`). At boot, `pvesan-sync.service` runs `pvesan iscsi restore` before `pvesan sync`, which logs in to every recorded portal the node has no session to. That also covers nodes that join the cluster later. The monitor registers a new node's initiator name on arrays with auto-register on, and logs it in to their portals. open-iscsi's own `node.startup=automatic` also restores the sessions.
+
+`pvesan array remove` drops the array's recorded portals. The nodes stay logged in until they reboot or you log them out (`iscsiadm -m node -T <iqn> -p <portal> --logout`, then `-o delete`).
+
+**Troubleshooting**
+
+| Symptom | Fix |
+| --- | --- |
+| `iSCSI host registration is not supported yet` | The driver has no verified iSCSI calls. Register the hosts on the array by hand and use `pvesan iscsi login`, or use FC. |
+| `array ... reports no iSCSI target portals` | Use `pvesan array iscsi-login <array> --portals ...` |
+| `no iSCSI session to portal ... could be established` | Check the network path, CHAP, and that the host object holds this node's initiator name (`pvesan array hosts <array>`). |
+| LUN not visible after login | Check the host is in the host cluster (`pvesan array status`), then `pvesan rescan`. |
+
 ## Troubleshooting and recovery
 
 Start from the task log. Every cluster-wide step prints `[node] FAILED: <reason>`, and that reason is the stderr of the LVM or multipath command, or the array's error message.
@@ -552,6 +610,9 @@ Each `pvesan` command calls the API method in the same row, so `pvesan help <com
 | `pvesan rescan` | `POST rescan` | node | `--lip`, `--resize` |
 | `pvesan rescan-all` | `POST rescan-all` | cluster task | `--lip` |
 | `pvesan sync` | `POST sync` | node | |
+| `pvesan iscsi status` | `GET iscsi` | node | |
+| `pvesan iscsi login <portal>` | `POST iscsi-login` | node | `--target`, `--array` |
+| `pvesan iscsi restore` | `POST iscsi-restore` | node (boot) | |
 | `pvesan iostats` | `GET iostats` | node | `--interval` |
 | `pvesan path-health` | `GET path-health` | node | |
 | `pvesan path-health-reset` | `POST path-health-reset` | node | |
@@ -577,12 +638,13 @@ Each `pvesan` command calls the API method in the same row, so `pvesan help <com
 | `pvesan datastore delete <id>` | `DELETE datastores/{id}` | cluster task | `--destroy-data`, `--detach`, `--delete-volume` |
 | `pvesan array list` | `GET arrays` | cluster view | |
 | `pvesan array probe <address>` | `POST array-probe` | node | `--port`, `--type` |
-| `pvesan array add <id>` | `POST arrays` | cluster | `--type`, `--address`, `--port`, `--username`, `--fingerprint`, `--hostcluster`, `--auto-register`, vendor settings |
+| `pvesan array add <id>` | `POST arrays` | cluster | `--type`, `--address`, `--port`, `--username`, `--fingerprint`, `--hostcluster`, `--auto-register`, `--protocol` (`fc`, `iscsi`, `both`), vendor settings |
 | `pvesan array set <id>` | `PUT arrays/{id}` | cluster | as add, `--delete` |
 | `pvesan array remove <id>` | `DELETE arrays/{id}` | cluster | |
 | `pvesan array status <id>` | `GET arrays/{id}/status` | cluster view | |
 | `pvesan array pools <id>` | `GET arrays/{id}/pools` | — | |
 | `pvesan array register-cluster <id>` | `POST arrays/{id}/register-cluster` | cluster task | |
+| `pvesan array iscsi-login <id>` | `POST arrays/{id}/iscsi-login` | cluster task | `--portals` |
 | `pvesan array link <id> <storage>` | `POST arrays/{id}/link` | cluster | |
 | `pvesan array zoning <id>` | `GET arrays/{id}/zoning` | cluster view | |
 | `pvesan array hosts <id>` | `GET arrays/{id}/hosts` | cluster view | |

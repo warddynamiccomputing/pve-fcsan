@@ -241,6 +241,7 @@ sub ensure_hostcluster {
     my ($self, $hcname, $node_wwpns, $log) = @_;
     $log //= sub { print "$_[0]\n" };
 
+    my $sets = $self->node_port_sets($node_wwpns); # IQNs: not supported yet
     $self->{node_wwpns} = $node_wwpns;
     my $hosts = $self->fc_hosts;
     my %have = map { $_->{wwn} => $_ } grep { $_->{wwn} } @$hosts;

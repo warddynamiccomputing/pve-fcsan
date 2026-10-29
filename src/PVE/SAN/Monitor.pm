@@ -168,24 +168,25 @@ sub zoning_rows {
 # Hosts in the cluster's host cluster that belong to no cluster member:
 # not named after a member and owning none of the (online) nodes' ports.
 sub stale_hosts {
-    my ($hosts, $hcname, $node_wwpns, $members) = @_;
-    my %member = map { $_ => 1 } @{$members // [ keys %$node_wwpns ]};
-    my %ours = map { $_ => 1 } map { @{$node_wwpns->{$_}} } keys %$node_wwpns;
+    my ($hosts, $hcname, $node_ports, $members) = @_;
+    my %member = map { $_ => 1 } @{$members // [ keys %$node_ports ]};
+    my %ours = map { $_ => 1 } grep { defined } map { PVE::SAN::Array::Base::norm_port($_) }
+        map { @{$node_ports->{$_}} } keys %$node_ports;
     return [ grep {
         ($_->{hostcluster} // '') eq $hcname
             && !$member{$_->{name}}
-            && !grep { $ours{$_} } @{$_->{wwpns} // []}
+            && !grep { $ours{$_} } @{$_->{wwpns} // []}, @{$_->{iqns} // []}
     } @$hosts ];
 }
 
 # Nodes none of whose ports belong to any array host (new nodes).
 sub unregistered_nodes {
-    my ($hosts, $node_wwpns) = @_;
-    my %owned = map { $_ => 1 } map { @{$_->{wwpns} // []} } @$hosts;
+    my ($hosts, $node_ports) = @_;
+    my %owned = map { $_ => 1 } map { @{$_->{wwpns} // []}, @{$_->{iqns} // []} } @$hosts;
     return [ sort grep {
-        my $w = $node_wwpns->{$_};
-        @$w && !grep { $owned{PVE::SAN::Array::Base::norm_wwpn($_) // ''} } @$w
-    } keys %$node_wwpns ];
+        my $w = $node_ports->{$_};
+        @$w && !grep { $owned{PVE::SAN::Array::Base::norm_port($_) // ''} } @$w
+    } keys %$node_ports ];
 }
 
 # Datastore -> disks of each guest config text.
@@ -472,31 +473,39 @@ sub zoning {
 sub register_new_nodes {
     my (%p) = @_;
     my $id = $p{array};
-    my $hc = PVE::SAN::Array::hostcluster(PVE::SAN::Array::config($id));
+    my $cfg = PVE::SAN::Array::config($id);
+    my $hc = PVE::SAN::Array::hostcluster($cfg);
+    my $protocol = PVE::SAN::Array::protocol($cfg);
     my $drv = PVE::SAN::Array::driver($id);
-    my $wwpns = $p{node_wwpns} // PVE::SAN::Array::node_wwpns();
-    my $new = unregistered_nodes($drv->hosts(), $wwpns);
+    my $ports = $p{node_ports} // PVE::SAN::Array::node_ports($protocol);
+    my $new = unregistered_nodes($drv->hosts(), $ports);
     return [] if !@$new;
     print "registering new node(s) @$new on array '$id'\n";
-    $drv->ensure_hostcluster($hc, { map { $_ => $wwpns->{$_} } @$new });
+    $drv->ensure_hostcluster($hc, { map { $_ => $ports->{$_} } @$new });
+    if ($protocol ne 'fc') {
+        require PVE::SAN::Provision;
+        PVE::SAN::Provision::iscsi_login(array => $id, driver => $drv, nodes => $new, quiet => 1);
+    }
     return $new;
 }
 
 sub array_hosts {
     my (%p) = @_;
     my $id = $p{array};
-    my $hc = PVE::SAN::Array::hostcluster(PVE::SAN::Array::config($id));
+    my $cfg = PVE::SAN::Array::config($id);
+    my $hc = PVE::SAN::Array::hostcluster($cfg);
     my $drv = PVE::SAN::Array::driver($id);
     my $hosts = $drv->hosts();
     # with a node offline its host can't be told from a removed node's
     my $off = PVE::SAN::Cluster::offline_nodes();
     my $stale = @$off ? {} : { map { $_->{name} => 1 }
-        @{stale_hosts($hosts, $hc, PVE::SAN::Array::node_wwpns(), PVE::SAN::Cluster::all_nodes())} };
+        @{stale_hosts($hosts, $hc, PVE::SAN::Array::node_ports(PVE::SAN::Array::protocol($cfg)), PVE::SAN::Cluster::all_nodes())} };
     return [ map {
         {
             host => $_->{name},
             hostcluster => $_->{hostcluster},
             wwpns => join(',', map { PVE::SAN::Array::Base::colon_wwpn($_) } @{$_->{wwpns} // []}),
+            iqns => join(',', @{$_->{iqns} // []}),
             stale => $stale->{$_->{name}} ? 1 : 0,
         }
     } grep { ($_->{hostcluster} // '') eq $hc } @$hosts ];
@@ -505,7 +514,8 @@ sub array_hosts {
 sub remove_stale_host {
     my (%p) = @_;
     my $id = $p{array};
-    my $hc = PVE::SAN::Array::hostcluster(PVE::SAN::Array::config($id));
+    my $cfg = PVE::SAN::Array::config($id);
+    my $hc = PVE::SAN::Array::hostcluster($cfg);
     my $drv = PVE::SAN::Array::driver($id);
     my $hosts = $drv->hosts();
     my ($host) = grep { $_->{name} eq $p{host} } @$hosts;
@@ -513,7 +523,7 @@ sub remove_stale_host {
     my $off = PVE::SAN::Cluster::offline_nodes();
     die "node(s) offline: @$off - bring them online first so their hosts are not mistaken for a removed node's
 " if @$off;
-    my $stale = stale_hosts($hosts, $hc, PVE::SAN::Array::node_wwpns(), PVE::SAN::Cluster::all_nodes());
+    my $stale = stale_hosts($hosts, $hc, PVE::SAN::Array::node_ports(PVE::SAN::Array::protocol($cfg)), PVE::SAN::Cluster::all_nodes());
     die "host '$p{host}' still belongs to a cluster node (or is not in host cluster '$hc') - only hosts of removed nodes can be removed\n"
         if !grep { $_->{name} eq $p{host} } @$stale;
     print "removing host '$p{host}' from host cluster '$hc' and deleting it on array '$id'\n";
@@ -569,13 +579,14 @@ sub run {
     # membership change
     my $members = join(',', @{PVE::SAN::Cluster::all_nodes()});
     my $cache = read_cache();
-    my $wwpns;
+    my %ports; # protocol => node ports
     for my $id (sort keys %{$cfg->{arrays} // {}}) {
         next if defined($cfg->{arrays}->{$id}->{auto_register}) && !$cfg->{arrays}->{$id}->{auto_register};
         next if ($cache->{members}->{$id} // '') eq $members;
         my $ok = eval {
-            $wwpns //= PVE::SAN::Array::node_wwpns();
-            my $new = register_new_nodes(array => $id, node_wwpns => $wwpns);
+            my $proto = PVE::SAN::Array::protocol($cfg->{arrays}->{$id});
+            $ports{$proto} //= PVE::SAN::Array::node_ports($proto);
+            my $new = register_new_nodes(array => $id, node_ports => $ports{$proto});
             notify('info', "pvesan registered new node(s) on array '$id'", [ "nodes: @$new" ]) if @$new;
             1;
         };

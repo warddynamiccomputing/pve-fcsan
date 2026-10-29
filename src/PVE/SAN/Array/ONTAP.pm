@@ -12,11 +12,14 @@ package PVE::SAN::Array::ONTAP;
 #   map      POST protocols/san/lun-maps {svm, igroup, lun}
 #   unmap    DELETE protocols/san/lun-maps/<lun.uuid>/<igroup.uuid>
 #   changes run as jobs: ?return_timeout=120, then poll cluster/jobs/<uuid>
+#   iSCSI    igroup protocol iscsi or mixed (fcp/iscsi/mixed, fixed at creation);
+#            portals: GET network/ip/interfaces services=data_iscsi, target name:
+#            GET protocols/san/iscsi/services target.name (Cinder ONTAP REST client)
 #
 # Layout: each datastore LUN gets its own FlexVol (/vol/<name>/lun0) in the
 # chosen aggregate - NetApp's recommendation for VMware datastores, and it
-# keeps snapshots and efficiency per datastore. The cluster is one FCP
-# igroup (os_type linux) holding every node's WWPNs.
+# keeps snapshots and efficiency per datastore. The cluster is one igroup
+# (os_type linux) holding every node's WWPNs and/or iSCSI initiator names.
 #
 # Multipath WWID: 3 + NAA 600a0980 + hex of the 12-character LUN serial.
 
@@ -126,44 +129,70 @@ sub igroup {
 }
 
 sub ensure_hostcluster {
-    my ($self, $hcname, $node_wwpns, $log) = @_;
+    my ($self, $hcname, $node_ports, $log) = @_;
     $log //= sub { print "$_[0]\n" };
 
     die "invalid igroup name '$hcname'\n" if !valid_igroup_name($hcname);
 
-    my %want; # WWPN => node
-    for my $node (sort keys %$node_wwpns) {
-        my @w = grep { defined } map { PVE::SAN::Array::Base::norm_wwpn($_) } @{$node_wwpns->{$node}};
-        die "node '$node' has no FC ports\n" if !@w;
-        $want{$_} = $node for @w;
+    my %want; # WWPN or IQN => node
+    my ($fc, $iscsi) = (0, 0);
+    my $sets = $self->node_port_sets($node_ports);
+    for my $node (sort keys %$sets) {
+        my ($w, $i) = @{$sets->{$node}};
+        $want{$_} = $node for @$w, @$i;
+        $fc ||= @$w;
+        $iscsi ||= @$i;
     }
+    my $name_of = sub { $_[0] =~ /\./ ? $_[0] : PVE::SAN::Array::Base::colon_wwpn($_[0]) };
 
-    my %result = map { $_ => { host => "igroup $hcname", created => 0, added_ports => [], joined => 0 } } keys %$node_wwpns;
+    my %result = map { $_ => { host => "igroup $hcname", created => 0, added_ports => [], joined => 0 } } keys %$sets;
     my $g = $self->igroup($hcname);
     if (!$g) {
-        $log->("creating FCP igroup '$hcname' in SVM $self->{svm} with " . scalar(keys %want) . " initiators");
+        # the igroup protocol cannot be changed later (na_ontap_igroup)
+        my $protocol = $fc && $iscsi ? 'mixed' : $iscsi ? 'iscsi' : 'fcp';
+        $protocol = 'mixed' if ($self->{protocol} // '') eq 'both';
+        $log->("creating " . uc($protocol) . " igroup '$hcname' in SVM $self->{svm} with " . scalar(keys %want) . " initiators");
         $self->call('POST', '/protocols/san/igroups', undef, {
             name => $hcname,
             svm => { name => $self->{svm} },
             os_type => 'linux',
-            protocol => 'fcp',
-            initiators => [ map { { name => PVE::SAN::Array::Base::colon_wwpn($_) } } sort keys %want ],
+            protocol => $protocol,
+            initiators => [ map { { name => $name_of->($_) } } sort keys %want ],
         });
         $_->{joined} = 1 for values %result;
         return \%result;
     }
 
-    die "igroup '$hcname' exists with protocol '$g->{protocol}', not fcp/mixed\n"
-        if ($g->{protocol} // 'fcp') !~ /^(?:fcp|mixed)$/;
-    my %have = map { (PVE::SAN::Array::Base::norm_wwpn($_->{name}) // '') => 1 } @{$g->{initiators} // []};
+    my $gp = $g->{protocol} // 'fcp';
+    die "igroup '$hcname' exists with protocol '$gp', which cannot hold FC initiators (needs fcp or mixed)\n"
+        if $fc && $gp !~ /^(?:fcp|mixed)$/;
+    die "igroup '$hcname' exists with protocol '$gp', which cannot hold iSCSI initiators (needs iscsi or mixed)\n"
+        if $iscsi && $gp !~ /^(?:iscsi|mixed)$/;
+    my %have = map { (PVE::SAN::Array::Base::norm_port($_->{name}) // '') => 1 } @{$g->{initiators} // []};
     my @missing = sort grep { !$have{$_} } keys %want;
     if (@missing) {
         $log->("adding initiators @missing to igroup '$hcname'");
         $self->call('POST', "/protocols/san/igroups/$g->{uuid}/initiators", undef,
-            { records => [ map { { name => PVE::SAN::Array::Base::colon_wwpn($_) } } @missing ] });
+            { records => [ map { { name => $name_of->($_) } } @missing ] });
         push @{$result{$want{$_}}->{added_ports}}, $_ for @missing;
     }
     return \%result;
+}
+
+sub supports_iscsi { return 1; }
+
+# Data LIFs with the data_iscsi service and the SVM's iSCSI target name,
+# as Cinder's ONTAP REST client reads them (client_cmode_rest.py
+# get_iscsi_target_details, get_iscsi_service_details). ONTAP iSCSI always
+# listens on port 3260.
+sub target_portals {
+    my ($self) = @_;
+    my ($svc) = @{$self->records('/protocols/san/iscsi/services', { 'svm.name' => $self->{svm}, fields => 'target.name' })};
+    my $iqn = $svc && ref($svc->{target}) eq 'HASH' ? PVE::SAN::Array::Base::norm_iqn($svc->{target}->{name}) : undef;
+    return [ map { { address => $_->{ip}->{address}, port => 3260, iqn => $iqn } }
+        grep { ref($_->{ip}) eq 'HASH' && $_->{ip}->{address} && (!defined($_->{enabled}) || $_->{enabled}) }
+        @{$self->records('/network/ip/interfaces',
+            { 'svm.name' => $self->{svm}, services => 'data_iscsi', fields => 'ip.address,enabled' })} ];
 }
 
 # --- LUNs (id = LUN uuid) ---

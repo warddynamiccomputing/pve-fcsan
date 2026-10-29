@@ -112,6 +112,34 @@ sub extract_wwpns {
     return [ sort keys %found ];
 }
 
+# iSCSI host ports: "iscsi_name" keys, folded or nested the same way.
+sub extract_iqns {
+    my ($data) = @_;
+    my %found;
+    my $walk;
+    $walk = sub {
+        my ($x) = @_;
+        if (ref($x) eq 'HASH') {
+            for my $k (keys %$x) {
+                my $v = $x->{$k};
+                if (lc($k) eq 'iscsi_name') {
+                    for my $n (ref($v) eq 'ARRAY' ? @$v : ($v)) {
+                        my $q = ref($n) ? undef : PVE::SAN::Array::Base::norm_iqn($n);
+                        $found{$q} = 1 if defined($q);
+                    }
+                } elsif (ref($v)) {
+                    $walk->($v);
+                }
+            }
+        } elsif (ref($x) eq 'ARRAY') {
+            $walk->($_) for @$x;
+        }
+    };
+    $walk->($data);
+    undef $walk;
+    return [ sort keys %found ];
+}
+
 sub walk_wwpns {
     my ($x, $found) = @_;
     if (ref($x) eq 'HASH') {
@@ -142,6 +170,7 @@ sub hosts {
             hostcluster => (defined($h->{host_cluster_name}) && length($h->{host_cluster_name}))
                 ? $h->{host_cluster_name} : undef,
             wwpns => extract_wwpns($detail),
+            iqns => extract_iqns($detail),
         };
     }
     return \@res;
@@ -185,21 +214,59 @@ sub create_hostcluster {
     $self->cmd('mkhostcluster', undef, { name => $name });
 }
 
-# force: ports need not be logged in yet (zoning may come later)
+# One kind of port per mkhost / addhostport call: -fcwwpn takes a
+# colon-separated list, -iscsiname a comma-separated one (IQNs contain
+# colons). force: ports need not be logged in yet (zoning may come later).
+sub port_params {
+    my ($wwpns, $iqns) = @_;
+    my @p;
+    push @p, { fcwwpn => join(':', @$wwpns), force => JSON::PP::true } if @$wwpns;
+    push @p, { iscsiname => join(',', @$iqns), force => JSON::PP::true } if @{$iqns // []};
+    return @p;
+}
+
 sub create_host {
-    my ($self, $name, $wwpns) = @_;
-    $self->cmd('mkhost', undef, { name => $name, fcwwpn => join(':', @$wwpns), force => JSON::PP::true });
-    return { name => $name, hostcluster => undef, wwpns => [@$wwpns] };
+    my ($self, $name, $wwpns, $iqns) = @_;
+    my ($first, @more) = port_params($wwpns, $iqns);
+    $self->cmd('mkhost', undef, { name => $name, %$first });
+    $self->cmd('addhostport', $name, $_) for @more;
+    return { name => $name, hostcluster => undef, wwpns => [@$wwpns], iqns => [@{$iqns // []}] };
 }
 
 sub add_host_ports {
-    my ($self, $host, $wwpns) = @_;
-    $self->cmd('addhostport', $host->{name}, { fcwwpn => join(':', @$wwpns), force => JSON::PP::true });
+    my ($self, $host, $wwpns, $iqns) = @_;
+    $self->cmd('addhostport', $host->{name}, $_) for port_params($wwpns, $iqns);
 }
 
 sub add_to_hostcluster {
     my ($self, $hcname, $host) = @_;
     $self->cmd('addhostclustermember', $hcname, { host => $host->{name} });
+}
+
+# --- iSCSI targets ---
+#
+# As OpenStack Cinder's Storwize driver finds them (storwize_svc_common.py
+# get_node_info, add_iscsi_ip_addrs): each online node's target name is
+# lsnode "iscsi_name"; its portals are lsip -filtervalue portset_name=portset0
+# (code level 8.4.2+) or, before, lsportip rows with host=yes and state
+# configured/online.
+
+sub supports_iscsi { return 1; }
+
+sub target_portals {
+    my ($self) = @_;
+    my %iqn = map { $_->{id} => PVE::SAN::Array::Base::norm_iqn($_->{iscsi_name}) }
+        grep { ($_->{status} // 'online') eq 'online' } @{$self->list('lsnode')};
+
+    my @ips = map { { node => $_->{node_id}, ip => $_->{IP_address} } }
+        @{(eval { $self->list('lsip', { filtervalue => 'portset_name=portset0' }) }) // []};
+    if (!@ips) {
+        @ips = map { ({ node => $_->{node_id}, ip => $_->{IP_address} }, { node => $_->{node_id}, ip => $_->{IP_address_6} }) }
+            grep { ($_->{host} // '') eq 'yes' && ($_->{state} // '') =~ /^(?:configured|online)$/ }
+            @{$self->list('lsportip')};
+    }
+    return [ map { { address => $_->{ip}, port => 3260, iqn => $iqn{$_->{node}} } }
+        grep { defined($_->{ip}) && length($_->{ip}) && defined($_->{node}) && $iqn{$_->{node}} } @ips ];
 }
 
 # --- volumes ---

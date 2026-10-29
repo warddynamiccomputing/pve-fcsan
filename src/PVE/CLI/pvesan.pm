@@ -50,14 +50,27 @@ my $print_array_status = sub {
         PVE::CLIFormatter::print_api_result($data, $schema, undef, $options);
         return;
     }
-    printf("array %s: %s %s, code level %s\nhost cluster '%s': %s\n\n",
-        $data->{array}, $data->{product} // '', $data->{system} // '', $data->{code_level} // '?',
+    printf("array %s: %s %s, code level %s, protocol %s\nhost cluster '%s': %s\n\n",
+        $data->{array}, $data->{product} // '', $data->{system} // '', $data->{code_level} // '?', $data->{protocol} // 'fc',
         $data->{hostcluster}, $data->{hostcluster_exists} ? 'present' : 'missing (run register-cluster)');
     printf("%-16s %-10s %-20s %-16s %s\n", 'NODE', 'REGISTERED', 'ARRAY HOST', 'HOST CLUSTER', 'UNREGISTERED PORTS');
     for my $n (@{$data->{nodes}}) {
         printf("%-16s %-10s %-20s %-16s %s\n", $n->{node}, $n->{registered} ? 'yes' : 'NO',
             $n->{host} || '-', $n->{hostcluster} // '-', $n->{missing} || '-');
     }
+};
+
+my $print_iscsi = sub {
+    my ($data, $schema, $options) = @_;
+    if (($options->{'output-format'} // 'text') ne 'text') {
+        PVE::CLIFormatter::print_api_result($data, $schema, undef, $options);
+        return;
+    }
+    printf("initiator: %s%s\n\n", $data->{initiator} // '(none)', $data->{installed} ? '' : ' (open-iscsi not installed)');
+    printf("%-28s %s\n", 'SESSION PORTAL', 'TARGET');
+    printf("%-28s %s\n", $_->{portal}, $_->{target}) for @{$data->{sessions} // []};
+    printf("\n%-28s %-16s %s\n", 'RECORDED PORTAL', 'ARRAY', 'TARGET');
+    printf("%-28s %-16s %s\n", $_->{portal}, $_->{array} // '-', $_->{target} // 'all') for @{$data->{portals} // []};
 };
 
 my $fmt = $PVE::RESTHandler::standard_output_options;
@@ -78,6 +91,11 @@ our $cmddef = {
     rescan => [ $api, 'rescan', [], $node, $print_obj, $fmt ],
     'rescan-all' => [ $api, 'rescan_all', [], $node, $task ],
     sync => [ $api, 'sync', [], $node, $print_obj, $fmt ],
+    iscsi => {
+        status => [ $api, 'iscsi', [], $node, $print_iscsi, $fmt ],
+        login => [ $api, 'iscsi_login', ['portal'], $node, $print_obj, $fmt ],
+        restore => [ $api, 'iscsi_restore', [], $node, $print_obj, $fmt ],
+    },
 
     iostats => [ $api, 'iostats', [], $node,
         $table->(qw(name datastore r_iops w_iops r_bps w_bps r_lat_ms w_lat_ms util)), $fmt ],
@@ -118,7 +136,7 @@ our $cmddef = {
 
     array => {
         list => [ $api, 'arrays', [], $node,
-            $table->(qw(array type address username hostcluster system datastores)), $fmt ],
+            $table->(qw(array type address username hostcluster protocol system datastores)), $fmt ],
         probe => [ $api, 'array_probe', ['address'], $node, $print_obj, $fmt ],
         add => [ $api, 'array_add', ['array'], $node, $print_obj, $fmt ],
         set => [ $api, 'array_update', ['array'], $node ],
@@ -126,9 +144,10 @@ our $cmddef = {
         status => [ $api, 'array_status', ['array'], $node, $print_array_status, $fmt ],
         pools => [ $api, 'array_pools', ['array'], $node, $table->(qw(name status capacity free)), $fmt ],
         'register-cluster' => [ $api, 'array_register', ['array'], $node, $task ],
+        'iscsi-login' => [ $api, 'array_iscsi_login', ['array'], $node, $task ],
         link => [ $api, 'array_link', ['array', 'storage'], $node, $print_obj, $fmt ],
         zoning => [ $api, 'array_zoning', ['array'], $node, $print_obj, $fmt ],
-        hosts => [ $api, 'array_hosts', ['array'], $node, $table->(qw(host hostcluster wwpns stale)), $fmt ],
+        hosts => [ $api, 'array_hosts', ['array'], $node, $table->(qw(host hostcluster wwpns iqns stale)), $fmt ],
         'remove-host' => [ $api, 'array_remove_host', ['array', 'host'], $node, $task ],
     },
 

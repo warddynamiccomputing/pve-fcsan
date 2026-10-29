@@ -16,6 +16,7 @@ Depends: libpve-storage-perl (>= 8.0),
          util-linux,
          ${misc:Depends},
          ${perl:Depends},
+Suggests: open-iscsi
 Description: vCenter-style Fibre Channel SAN management for Proxmox VE
  Adds a 'fcsan' storage type (shared LVM on multipathed FC/iSCSI LUNs), a
  REST API under /nodes/{node}/san, the 'pvesan' CLI and a GUI panel

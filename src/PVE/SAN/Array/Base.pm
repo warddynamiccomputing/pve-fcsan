@@ -8,10 +8,11 @@ package PVE::SAN::Array::Base;
 #   system_info()                      -> { name, product, code_level }
 #   pools()                            -> [ { name, capacity, free, status } ]
 #   host_clusters()                    -> [ { name, id } ]
-#   hosts()                            -> [ { name, id, hostcluster, wwpns => [WWPN] } ]
+#   hosts()                            -> [ { name, id, hostcluster, wwpns => [WWPN],
+#                                             iqns => [IQN] } ]
 #   create_hostcluster($name)
-#   create_host($name, \@wwpns)        -> host (same shape as hosts())
-#   add_host_ports($host, \@wwpns)
+#   create_host($name, \@wwpns, \@iqns) -> host (same shape as hosts())
+#   add_host_ports($host, \@wwpns, \@iqns)
 #   add_to_hostcluster($hcname, $host)
 #   create_volume(name, pool, size_gib, thin) -> volume
 #   volume($id), find_volume_by_wwid($wwid)   -> { id, name, capacity, uid, wwid }
@@ -33,7 +34,14 @@ package PVE::SAN::Array::Base;
 #                size (bytes), group (array object deleted with it, if any) }
 #   'name' is the pvesan snapshot name, the same for every member of one set.
 #
-# WWPNs are passed around as 16 upper-case hex digits without colons.
+# WWPNs are passed around as 16 upper-case hex digits without colons, iSCSI
+# names (iqn./eui.) in lower case. Only drivers whose supports_iscsi() is
+# true are handed IQNs; ensure_hostcluster refuses them for the others.
+#
+# iSCSI (optional, with supports_iscsi()):
+#
+#   target_portals()                   -> [ { address, port, iqn } ] the array's
+#                                         iSCSI portals and their target names
 
 use strict;
 use warnings;
@@ -84,6 +92,7 @@ sub volume_space {
 
 sub health { return undef; }
 sub target_ports { return undef; }
+sub target_portals { return undef; }
 sub remove_host { die $_[0]->description . ": removing hosts is not supported yet by the pvesan driver\n" }
 
 # no_path_retry pvesan sets for this array's LUNs when it provisions them.
@@ -231,8 +240,65 @@ sub naa_to_wwid {
 sub norm_wwpn {
     my ($w) = @_;
     $w = uc($w // '');
+    return undef if $w =~ /^(?:IQN|EUI)\./; # an iSCSI name, not a WWPN
     $w =~ s/[^0-9A-F]//g;
     return length($w) == 16 ? $w : undef;
+}
+
+# iSCSI names (RFC 3720): iqn.yyyy-mm.<reversed domain>[:<anything>] or
+# eui.<16 hex digits>; compared case-insensitively, kept in lower case.
+sub norm_iqn {
+    my ($n) = @_;
+    $n = lc($n // '');
+    $n =~ s/^\s+|\s+$//g;
+    $n =~ s/,.*$//; # "<iqn>,t,0x1": target portal group suffix
+    return $n if $n =~ /^iqn\.\d{4}-\d{2}\.[a-z0-9][a-z0-9.:-]*$/ && length($n) <= 223;
+    return $n if $n =~ /^eui\.[0-9a-f]{16}$/;
+    return undef;
+}
+
+# Node ports -> (\@wwpns, \@iqns), normalised, without duplicates.
+sub split_ports {
+    my ($ports) = @_;
+    my (@w, @i, %seen);
+    for my $p (@{$ports // []}) {
+        if (defined(my $q = norm_iqn($p))) {
+            push @i, $q if !$seen{$q}++;
+        } elsif (defined(my $w = norm_wwpn($p))) {
+            push @w, $w if !$seen{$w}++;
+        }
+    }
+    return (\@w, \@i);
+}
+
+sub norm_port {
+    my ($p) = @_;
+    return norm_iqn($p) // norm_wwpn($p);
+}
+
+# --- iSCSI ---
+
+sub supports_iscsi { return 0; }
+
+sub check_iscsi {
+    my ($self) = @_;
+    die $self->description . ": iSCSI host registration is not supported yet by the pvesan driver\n"
+        if !$self->supports_iscsi;
+}
+
+# Which kinds of node ports the array is set to use (array setting
+# 'protocol': fc, iscsi or both).
+sub protocols {
+    my ($self) = @_;
+    my $p = $self->{protocol} // 'fc';
+    return $p eq 'both' ? [ 'fc', 'iscsi' ] : [ $p ];
+}
+
+# Array setting check when an array is added or changed.
+sub check_protocol {
+    my ($class, $protocol) = @_;
+    die "unknown protocol '$protocol' (fc, iscsi or both)\n" if $protocol !~ /^(?:fc|iscsi|both)$/;
+    $class->check_iscsi if $protocol ne 'fc';
 }
 
 # --- snapshots ---
@@ -330,16 +396,31 @@ sub volume_name_for {
     return $self->valid_name($storeid) ? $storeid : $self->object_name_for($storeid);
 }
 
+# { node => [WWPN or IQN, ...] } -> { node => [\@wwpns, \@iqns] }. Every
+# node needs at least one port; IQNs only for drivers with iSCSI support.
+sub node_port_sets {
+    my ($self, $node_ports) = @_;
+    my %res;
+    for my $node (sort keys %$node_ports) {
+        my ($w, $i) = split_ports($node_ports->{$node});
+        die "node '$node' has no FC ports or iSCSI initiator name\n" if !@$w && !@$i;
+        $self->check_iscsi if @$i;
+        $res{$node} = [ $w, $i ];
+    }
+    return \%res;
+}
+
 # Make sure every node's ports are in a host object and every such host is
-# in host cluster $hcname. $node_wwpns = { node => [WWPN, ...] }.
+# in host cluster $hcname. $node_ports = { node => [WWPN or IQN, ...] }.
 # Existing hosts that already own a node's ports are reused; a host in a
 # different host cluster or ports split across hosts are refused (that is
 # an admin decision on the array).
 sub ensure_hostcluster {
-    my ($self, $hcname, $node_wwpns, $log) = @_;
+    my ($self, $hcname, $node_ports, $log) = @_;
     $log //= sub { print "$_[0]\n" };
 
     die "invalid host cluster name '$hcname' for this array\n" if !$self->valid_hostcluster_name($hcname);
+    my $sets = $self->node_port_sets($node_ports);
 
     if (!grep { $_->{name} eq $hcname } @{$self->host_clusters()}) {
         $log->("creating host cluster '$hcname'");
@@ -348,13 +429,13 @@ sub ensure_hostcluster {
 
     my $hosts = $self->hosts();
     my %owner;
-    for my $h (@$hosts) { $owner{$_} = $h for @{$h->{wwpns}}; }
+    for my $h (@$hosts) { $owner{$_} = $h for @{$h->{wwpns} // []}, @{$h->{iqns} // []}; }
     my %taken = map { $_->{name} => 1 } @$hosts;
 
     my %result;
-    for my $node (sort keys %$node_wwpns) {
-        my @want = grep { defined } map { norm_wwpn($_) } @{$node_wwpns->{$node}};
-        die "node '$node' has no FC ports\n" if !@want;
+    for my $node (sort keys %$sets) {
+        my ($ww, $wi) = @{$sets->{$node}};
+        my @want = (@$ww, @$wi);
 
         my %owners = map { $_->{name} => $_ } grep { defined } map { $owner{$_} } @want;
         die "ports of node '$node' are split across array hosts " . join(', ', sort keys %owners)
@@ -364,19 +445,20 @@ sub ensure_hostcluster {
         my $r = $result{$node} = { created => 0, added_ports => [], joined => 0 };
 
         if ($host) {
-            my %have = map { $_ => 1 } @{$host->{wwpns}};
-            my @missing = grep { !$have{$_} } @want;
-            if (@missing) {
-                $log->("adding ports @missing to array host '$host->{name}' ($node)");
-                $self->add_host_ports($host, \@missing);
-                $r->{added_ports} = \@missing;
+            my %have = map { $_ => 1 } @{$host->{wwpns} // []}, @{$host->{iqns} // []};
+            my @mw = grep { !$have{$_} } @$ww;
+            my @mi = grep { !$have{$_} } @$wi;
+            if (@mw || @mi) {
+                $log->("adding ports " . join(' ', @mw, @mi) . " to array host '$host->{name}' ($node)");
+                $self->add_host_ports($host, \@mw, \@mi);
+                $r->{added_ports} = [ @mw, @mi ];
             }
         } else {
             my $name = $self->valid_name($node) ? $node : $self->object_name_for($node);
             $name .= '-pve' if $taken{$name};
             die "array already has hosts '$node' and '$name'\n" if $taken{$name};
             $log->("creating array host '$name' for node $node with ports @want");
-            $host = $self->create_host($name, \@want);
+            $host = $self->create_host($name, $ww, $wi);
             $taken{$name} = 1;
             $r->{created} = 1;
         }
