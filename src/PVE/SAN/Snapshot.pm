@@ -640,6 +640,8 @@ sub claim {
     my $node = PVE::SAN::Cluster::local_node();
     my $now = time();
     my $skey = "${kind}_state";
+    # the timers fire on every node; only take the lock when something is due
+    return [] if !grep { !$filter || $filter->($_) } @{due_jobs(PVE::SAN::Config::load(), $kind, $now)};
     return PVE::SAN::Config::update(sub {
         my ($cfg) = @_;
         my @mine;

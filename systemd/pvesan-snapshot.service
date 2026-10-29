@@ -1,0 +1,8 @@
+[Unit]
+Description=Take due scheduled pvesan array snapshots
+After=pve-cluster.service
+Requires=pve-cluster.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/pvesan snapshot-run
