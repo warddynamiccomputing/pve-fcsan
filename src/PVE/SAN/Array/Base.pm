@@ -18,9 +18,6 @@ package PVE::SAN::Array::Base;
 #   map_to_hostcluster($vol_id, $hc), unmap_from_hostcluster($vol_id, $hc)
 #   expand_volume($vol_id, $add_bytes), delete_volume($vol_id)
 #
-# Monitoring and lifecycle primitives are listed further down (volume_space,
-# health, target_ports, remove_host, default_no_path_retry).
-#
 # WWPNs are passed around as 16 upper-case hex digits without colons.
 
 use strict;

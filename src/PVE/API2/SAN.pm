@@ -79,7 +79,7 @@ $register->({
     parameters => { additionalProperties => 0, properties => { node => $node_opt } },
     returns => { type => 'array', items => { type => 'object', properties => { name => { type => 'string' } } } },
     code => sub {
-        return [ map { { name => $_ } } qw(adapters array-probe arrays cleanup-paths datastores devices guests iostats monitor-run monitor-settings path-health path-health-reset paths policies remote-ports rescan rescan-all sync) ];
+        return [ map { { name => $_ } } qw(adapters array-probe arrays cleanup-paths datastores devices paths policies remote-ports rescan rescan-all sync) ];
     },
 });
 
