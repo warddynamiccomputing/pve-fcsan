@@ -225,7 +225,7 @@ sub delete_volume {
     $self->call('DELETE', "/volume/$vol", undef, undef);
 }
 
-# --- snapshots (single volume; volume groups are not used yet) ---
+# --- snapshots ---
 
 sub supports_snapshots { return 1; }
 
@@ -258,9 +258,72 @@ sub snapshot_from {
     };
 }
 
+# Datastores on several volumes: a write-order consistent volume group
+# "pvesan-<first volume name>" holds the volumes and is snapshotted as a
+# whole (PyPowerStore provisioning.create_volume_group, add_members_to_volume_group,
+# restore_volume_group; protection.create_volume_group_snapshot,
+# get_volume_group_snapshots, delete_volume_group_snapshot; constants
+# SELECT_ALL_VOL_GROUP with volumes(name,id)). The members of a snapshot
+# set are volume snapshots of the member volumes.
+
+sub supports_group_snapshots { return 1; }
+
+sub vgroup_name {
+    my ($self, $vols) = @_;
+    return substr('pvesan-' . $self->volume($vols->[0])->{name}, 0, 128);
+}
+
+sub ensure_vgroup {
+    my ($self, $vols) = @_;
+    my $name = $self->vgroup_name($vols);
+    my ($g) = @{$self->call('GET', '/volume_group', { select => 'id,name,volumes(name,id)', name => "eq.$name" }) // []};
+    if (!$g) {
+        print "creating volume group '$name'\n";
+        my $r = $self->call('POST', '/volume_group', undef,
+            { name => $name, volume_ids => [ @$vols ], is_write_order_consistent => JSON::PP::true });
+        return $r->{id};
+    }
+    my %in = map { $_->{id} => 1 } @{$g->{volumes} // []};
+    my @add = grep { !$in{$_} } @$vols;
+    if (@add) {
+        print "adding @add to volume group '$name'\n";
+        $self->call('POST', "/volume_group/$g->{id}/add_members", undef, { volume_ids => \@add });
+    }
+    return $g->{id};
+}
+
+# Snapshot sets of the volumes' group: { set id => { name, created, members => [ snapshot ] } }
+sub group_sets {
+    my ($self, $vols) = @_;
+    my $name = $self->vgroup_name($vols);
+    my ($g) = @{$self->call('GET', '/volume_group', { select => 'id,name', name => "eq.$name" }) // []};
+    return {} if !$g;
+    my %sets;
+    my $list = $self->call('GET', '/volume_group', {
+        select => 'id,name,creation_timestamp,volumes(name,id)',
+        'protection_data->>source_id' => "eq.$g->{id}",
+        type => 'eq.Snapshot',
+    }) // [];
+    for my $set (@$list) {
+        my @members = map {
+            my $m = snapshot_from($self->call('GET', "/volume/$_->{id}", { select => $SNAP_FIELDS }));
+            +{ %$m, name => $set->{name}, group => $set->{id}, vgroup => $g->{id} }
+        } @{$set->{volumes} // []};
+        $sets{$set->{id}} = { name => $set->{name}, members => \@members };
+    }
+    return \%sets;
+}
+
 sub snapshots {
     my ($self, $vols) = @_;
-    my @res;
+    my (@res, %in_set);
+    if (@$vols > 1) {
+        my $sets = $self->group_sets($vols);
+        for my $set (values %$sets) {
+            push @res, @{$set->{members}};
+            $in_set{$_->{id}} = 1 for @{$set->{members}};
+        }
+    }
     for my $id (@$vols) {
         my $parent = $self->volume($id);
         my $list = $self->call('GET', '/volume', {
@@ -268,7 +331,7 @@ sub snapshots {
             'protection_data->>source_id' => "eq.$id",
             type => 'eq.Snapshot',
         }) // [];
-        push @res, map { snapshot_from($_, $parent->{name}) } @$list;
+        push @res, map { snapshot_from($_, $parent->{name}) } grep { !$in_set{$_->{id}} } @$list;
     }
     return [ sort { ($a->{created} // 0) <=> ($b->{created} // 0) } @res ];
 }
@@ -276,15 +339,25 @@ sub snapshots {
 sub snapshot_create {
     my ($self, $vols, $name) = @_;
     $self->check_snapshot_args($vols, $name);
+    if (@$vols > 1) {
+        my $vg = $self->ensure_vgroup($vols);
+        $self->call('POST', "/volume_group/$vg/snapshot", undef, { name => $name });
+        return [ grep { $_->{name} eq $name && $_->{group} } @{$self->snapshots($vols)} ];
+    }
     my $parent = $self->volume($vols->[0]);
     my $r = $self->call('POST', "/volume/$vols->[0]/snapshot", undef, { name => substr("$parent->{name}.$name", 0, 128) });
     my $s = $self->call('GET', "/volume/$r->{id}", { select => $SNAP_FIELDS });
     return [ snapshot_from($s, $parent->{name}) ];
 }
 
+# A set taken of the volume group is deleted as a whole.
 sub snapshot_delete {
     my ($self, $snap) = @_;
-    $self->call('DELETE', "/volume/$snap->{id}", undef, undef);
+    if ($snap->{group}) {
+        $self->call('DELETE', "/volume_group/$snap->{group}", undef, undef);
+    } else {
+        $self->call('DELETE', "/volume/$snap->{id}", undef, undef);
+    }
 }
 
 sub snapshot_clone {
@@ -294,9 +367,17 @@ sub snapshot_clone {
     return $self->volume($r->{id});
 }
 
-# PowerStore keeps a backup snapshot of the volume's current state.
+# PowerStore keeps a backup snapshot of the current state. A member of a
+# volume group set restores the whole group, once.
 sub snapshot_restore {
     my ($self, $vol, $snap) = @_;
+    if ($snap->{group}) {
+        return if ($self->{restored_set} // '') eq $snap->{group};
+        $self->call('POST', "/volume_group/$snap->{vgroup}/restore", undef,
+            { from_snap_id => $snap->{group}, create_backup_snap => JSON::PP::true });
+        $self->{restored_set} = $snap->{group};
+        return;
+    }
     $self->call('POST', "/volume/$vol/restore", undef, { from_snap_id => $snap->{id}, create_backup_snap => JSON::PP::true });
 }
 

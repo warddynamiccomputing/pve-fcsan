@@ -179,7 +179,9 @@ Array drivers turn pvesan from a SAN manager into a provisioning tool. The array
 | --- | --- | --- | --- | --- | --- |
 | Pure FlashArray | `POST volume-snapshots?source_names=<vol>` `{suffix}` | Protection group `pvesan-<vol>`, `POST protection-group-snapshots` | `POST volumes` `{source}` | `POST volumes?overwrite=true` `{source}` | go-pure-client FA 2.50 docs |
 | INFINIDAT InfiniBox | `POST volumes` `{name, parent_id, write_protected}` | `POST volumes/group_snapshot` | Writable child of the snapshot | `POST volumes/<id>/restore` | InfiniSDK (`dataset.py`, `volume.py`) |
-| Dell PowerStore | `POST volume/<id>/snapshot` `{name}` | Not yet (volume groups) | `POST volume/<snap>/clone` | `POST volume/<id>/restore` `{from_snap_id, create_backup_snap}` | PyPowerStore (`protection.py`, `provisioning.py`) |
+| Dell PowerStore | `POST volume/<id>/snapshot` `{name}` | Write-order consistent volume group `pvesan-<vol>`, `POST volume_group/<id>/snapshot` | `POST volume/<snap>/clone` | `POST volume/<id>/restore`, or `POST volume_group/<id>/restore` for a set, both with `create_backup_snap` | PyPowerStore (`protection.py`, `provisioning.py`, `utils/constants.py`) |
+| NetApp ONTAP | `POST storage/volumes/<flexvol>/snapshots` `{name}` (the LUN's own FlexVol) | Not yet (consistency groups) | FlexClone `POST storage/volumes` `{clone.parent_volume.name, clone.parent_snapshot.name, clone.is_flexclone}`; its `lun0` | `PATCH storage/volumes/<flexvol>` `{restore_to.snapshot.name}` | NetApp Ansible (`na_ontap_snapshot`, `na_ontap_volume`, `na_ontap_volume_clone`) |
+| IBM Spectrum Virtualize | Thin target `pvs_<vol id>_<name>`, `mkfcmap -copyrate 0`, `prestartfcmap`, `startfcmap` | FlashCopy consistency group `pvs_<name>_<first id>` (`mkfcconsistgrp`, `startfcconsistgrp`) | Thin volume fed by `mkfcmap -copyrate 50 -autodelete` from the snapshot | `mkfcmap` snapshot → volume, `prestartfcmap -restore`, `startfcmap -restore` | OpenStack Cinder Storwize/SVC driver (`storwize_svc_common.py`) |
 
 A **snapshot set** is every array snapshot with the same pvesan name across the datastore's volumes (`group_sets`); a set missing a volume is listed as incomplete and can't be mounted or rolled back. A group snapshot (Pure protection group) is deleted once, not per member.
 
@@ -280,7 +282,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 
 **Layers.** `Util`, `Sysfs`, `Multipath` (parsing/rendering) and `LVM` (parsing) are pure Perl and read sysfs through `PVESAN_SYSFS_ROOT`, so a fixture tree replaces `/sys`. `Inventory`, `Ops`, `Config` and `Cluster` add Proxmox VE and command execution; `Datastore` and `Provision` compose them; `API2::SAN` exposes them; the CLI and GUI sit only on the API.
 
-**Tests** (`make test`, 659 checks):
+**Tests** (`make test`, 718 checks):
 
 | File | Covers |
 | --- | --- |
@@ -293,6 +295,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 | `t/68-snapshot-workflow.t` | Snapshot sets, retention, due jobs, VM config rewriting, and the snapshot, mount-copy, rollback and schedule workflows against a fake driver with the cluster steps stubbed |
 | `t/69-monitor.t` | I/O rates, path problems and learned path counts, alert differences, pool and health problems, zoning hints, new and stale hosts, `no_path_retry` rendering, the monitoring primitives of Pure, InfiniBox and PowerStore, and the monitor run (lease, registration, alerts sent once) |
 | `t/70-volumes.t` | `fcsanvol`: names and aliases, Pure's per-disk primitives, allocation with rollback on failure, the LUN limit, targeted activation, resize, snapshots, rollback, templates, linked clones, delete, and the plugin's features |
+| `t/72-snapshots-more.t` | Snapshots on NetApp ONTAP (FlexVol snapshots, FlexClone copies, restore, its own snapshots hidden, layout and serial checks) and IBM Spectrum Virtualize (FlashCopy targets, consistency groups, background copies, restore, clean-up after a failure) against stateful fake arrays |
 | `t/80-integrate.t` | `pvesan-integrate` against a fake pve-manager tree: insertion point, upgrade from an older line, refusal without the anchor, exact removal, and that the patched `Nodes.pm` still loads with a broken pve-fcsan |
 | `t/90-compile.t` | Loads every module; fails on compile warnings. Uses the real Proxmox VE libraries when present, stubs otherwise |
 
@@ -338,7 +341,7 @@ The build also checks that every Proxmox function the code calls exists in the i
 **Functional limits compared with vCenter**
 
 - Thick LVM only at the datastore layer (the array can still be thin). Per-VM snapshots on shared storage need Proxmox VE 9 volume chains.
-- Array snapshots, copies and restores need a driver with snapshot support (Pure, InfiniBox, PowerStore); for other arrays snapshot or replica LUNs are imported by hand (`vgimportclone` procedure in the runbook). Snapshots are crash-consistent; VMs are not frozen.
+- Array snapshots, copies and restores need a driver with snapshot support (Pure, InfiniBox, PowerStore, ONTAP, IBM Spectrum Virtualize); for other arrays snapshot or replica LUNs are imported by hand (`vgimportclone` procedure in the runbook). Snapshots are crash-consistent; VMs are not frozen.
 - No Storage I/O Control, datastore clusters, Storage DRS or datastore browser. Datastores can't be shrunk.
 - Nodes offline during a change catch up at boot through `pvesan-sync.service`.
 
@@ -347,5 +350,5 @@ The build also checks that every Proxmox function the code calls exists in the i
 1. Real-array validation for every driver; fix what it finds.
 2. A datacenter-level GUI view: all nodes' paths for one LUN side by side.
 3. `datastore adopt`: convert existing `lvm` storages on SAN to `fcsan`.
-4. Array snapshots for the remaining drivers; consistency groups on PowerStore; container restore.
+4. Array snapshots for the remaining drivers (PowerMax, E-Series, Hitachi, ETERNUS); ONTAP consistency groups; container restore.
 5. Per-LUN path statistics and fabric events.
