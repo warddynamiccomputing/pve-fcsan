@@ -150,7 +150,31 @@ our $cmddef = {
         'restore-vm' => [ $api, 'copy_restore_vm', ['storage', 'vmid'], $node, $task ],
     },
 
+    dr => {
+        # primary site
+        partners => [ $api, 'replication_partners', ['array'], $node, $table->(qw(name status type)), $fmt ],
+        status => [ $api, 'replication_get', ['storage'], $node, $print_obj, $fmt ],
+        enable => [ $api, 'replication_enable', ['storage', 'partner'], $node, $task ],
+        disable => [ $api, 'replication_disable', ['storage'], $node, $task ],
+        replicate => [ $api, 'replicate_now', ['storage'], $node, $task ],
+        'write-meta' => [ $api, 'dr_meta_write', ['storage'], $node, $task ],
+        plan => [ $api, 'recovery_plan_get', ['storage'], $node, $table->(qw(order vmid type delay)), $fmt ],
+        'set-plan' => [ $api, 'recovery_plan_set', ['storage', 'order'], $node, $table->(qw(order vmid type delay)), $fmt ],
+        'prepare-failover' => [ $api, 'prepare_failover', ['storage'], $node, $task ],
+        # DR site
+        replicas => [ $api, 'replicas', ['array'], $node,
+            $table->(qw(replica source storage replicas latest latest-time age volumes)), $fmt ],
+        snapshots => [ $api, 'replica_snapshots', ['array', 'replica'], $node,
+            $table->(qw(name created completed volumes)), $fmt ],
+        test => [ $api, 'dr_test', ['array', 'replica'], $node, $task ],
+        failover => [ $api, 'dr_failover', ['array', 'replica'], $node, $task ],
+        import => [ $api, 'dr_import', ['storage', 'wwids'], $node, $task ],
+        'run-plan' => [ $api, 'dr_run_plan', ['storage'], $node, $task ],
+        cleanup => [ $api, 'dr_cleanup', ['storage'], $node, $task ],
+    },
+
     # run by the systemd timers
+    'dr-run' => [ $api, 'dr_run', [], $node, $print_obj, $fmt ],
     'snapshot-run' => [ $api, 'snapshot_run', [], $node, $print_obj, $fmt ],
     'reclaim-run' => [ $api, 'reclaim_run', [], $node, $print_obj, $fmt ],
 };

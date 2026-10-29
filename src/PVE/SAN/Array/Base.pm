@@ -272,6 +272,43 @@ sub snapshot_restore { $_[0]->not_supported('restoring array snapshots') }
 
 sub supports_disk_volumes { return 0; }
 
+# --- replication to a second array (disaster recovery) ---
+#
+# Optional; supports_replication() says whether a driver has it. On the
+# source array:
+#
+#   replication_partners()              -> [ { name, status, type } ] connected arrays
+#   replication_enable(\@vol_ids, $partner, $interval_s, $retain_s) -> group
+#                                          replicate the volumes as one consistent
+#                                          group every $interval_s, keep replicas
+#                                          on the partner for $retain_s
+#   replication_disable(\@vol_ids, $partner)
+#   replicate_now(\@vol_ids, $name)     take a snapshot set $name and send it now
+#   replication_status(\@vol_ids)       -> { group, partners => [name], interval,
+#                                            transfers => [ transfer ] } newest first
+#
+# On the partner (DR) array:
+#
+#   replicas()                          -> [ { id, source (array), group } ] incoming groups
+#   replica_snapshots($replica_id)      -> [ { name, created, completed,
+#                                            members => [ { id, volume } ] } ] oldest first;
+#                                          only fully received ones; 'volume' is the
+#                                          source volume's name
+#   replica_clone($member, $name)       -> volume: new writable, unmapped copy
+#
+#   transfer = { name, started, completed, progress (0..1), bytes }
+
+sub supports_replication { return 0; }
+
+sub replication_partners { $_[0]->not_supported('replication') }
+sub replication_enable { $_[0]->not_supported('replication') }
+sub replication_disable { $_[0]->not_supported('replication') }
+sub replicate_now { $_[0]->not_supported('replication') }
+sub replication_status { $_[0]->not_supported('replication') }
+sub replicas { $_[0]->not_supported('replication') }
+sub replica_snapshots { $_[0]->not_supported('replication') }
+sub replica_clone { my ($self, $m, $name) = @_; return $self->snapshot_clone($m, $name); }
+
 sub volumes_named { $_[0]->not_supported('volumes per VM disk') }
 sub volume_by_name { $_[0]->not_supported('volumes per VM disk') }
 sub host_lun { $_[0]->not_supported('volumes per VM disk') }

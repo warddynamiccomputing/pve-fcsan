@@ -221,6 +221,8 @@ sub datastores {
             volumes => join(',', map { $_->{name} } @{$cfg->{datastores}->{$id}->{volumes} // []}),
             copy_of => $cfg->{datastores}->{$id}->{copy_of},
             snapshot => $cfg->{datastores}->{$id}->{snapshot},
+            replication => ($cfg->{datastores}->{$id}->{replication} // {})->{partner},
+            dr => ($cfg->{datastores}->{$id}->{dr_import} // {})->{mode},
         };
     }
     return \@res;

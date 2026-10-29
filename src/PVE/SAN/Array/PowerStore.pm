@@ -319,7 +319,7 @@ sub snapshots {
     my (@res, %in_set);
     if (@$vols > 1) {
         my $sets = $self->group_sets($vols);
-        for my $set (values %$sets) {
+        for my $set (map { $sets->{$_} } sort keys %$sets) {
             push @res, @{$set->{members}};
             $in_set{$_->{id}} = 1 for @{$set->{members}};
         }

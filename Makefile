@@ -32,6 +32,7 @@ install:
 	install -m 0644 systemd/pvesan-reclaim.service systemd/pvesan-reclaim.timer $(UNITDIR)/
 	install -D -m 0644 completion/pvesan $(BASHCOMPDIR)/pvesan
 	install -m 0644 systemd/pvesan-monitor.service systemd/pvesan-monitor.timer $(UNITDIR)/
+	install -m 0644 systemd/pvesan-dr.service systemd/pvesan-dr.timer $(UNITDIR)/
 	install -d $(TEMPLATEDIR)
 	install -m 0644 templates/pvesan-alert-subject.txt.hbs templates/pvesan-alert-body.txt.hbs $(TEMPLATEDIR)/
 

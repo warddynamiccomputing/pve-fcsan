@@ -242,7 +242,7 @@ for my $class (qw(PowerMax ESeries Hitachi Eternus)) {
             for my $v (@{$g->{volumes}}) {
                 my $id = "$set-$v->{id}";
                 $st{vols}->{$id} = { id => $id, name => "auto name $id", size => 10 * $GIB, type => 'Snapshot',
-                    creation_timestamp => '2026-10-29T09:00:00Z', protection_data => { source_id => $v->{id} } };
+                    creation_timestamp => sprintf('2026-10-29T09:%02d:00Z', $st{n}), protection_data => { source_id => $v->{id} } };
                 push @m, { id => $id, name => "auto name $id" };
             }
             $st{vgs}->{$set} = { id => $set, name => $_[2]->{name}, source => $g->{id}, volumes => \@m };

@@ -1,0 +1,8 @@
+[Unit]
+Description=Write the guest configs of replicated pvesan datastores onto them
+After=pve-cluster.service
+Requires=pve-cluster.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/pvesan dr-run

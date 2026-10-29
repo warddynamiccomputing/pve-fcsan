@@ -383,6 +383,50 @@ pvesm add fcsanvol fa-vols --fc-array fa1 --fc-pool default --content images
 
 **Limits.** Every disk is a LUN on every node. `fc-max-luns` (default 255) stops new disks before the array's or HBA's LUN limit; raise it only if your array and HBAs allow more LUNs per host. Raw disks only: no containers, no cloud-init drive and no qcow2. `deactivate` keeps the LUN visible on a node, so a node that ever ran a VM keeps its paths until the disk is deleted. Disk moves between `fcsanvol` and other storages use Proxmox's normal host copy. This storage type has not run on a real array yet; try it with a test VM first.
 
+### P18. Replication and disaster recovery (experimental)
+
+> **Experimental.** Replication setup works with Pure FlashArray only and has not yet run against real arrays. The DR-site import (`pvesan dr import`) works with LUNs from any array. Try the whole cycle with a test datastore and a test failover before you rely on it.
+
+Two Proxmox VE clusters, each with its own array: the primary cluster's array replicates the datastore to the DR array, and the DR cluster brings it up from the replica. Add each array to the cluster at its own site (P12) and connect the two arrays for asynchronous replication on the arrays themselves (on Pure: an array connection of type `async-replication`).
+
+**At the primary site**
+
+```bash
+pvesan dr partners fa-prod                      # arrays fa-prod can replicate to
+pvesan dr enable gold fa-dr --interval 60 --retain 24
+pvesan dr set-plan gold 101:60,102,103          # start order at the DR site, 60 s after 101
+pvesan dr status gold                           # newest complete replica, its age, transfer in progress
+pvesan dr replicate gold --wait 1               # refresh the guest configs and send a replica now
+```
+
+`enable` puts all volumes of the datastore in one protection group, so they replicate at one point in time (crash-consistent), and writes the configs of its guests onto the datastore (LV `pvesan-dr-meta`). `pvesan-dr.timer` refreshes them every 15 minutes, so a guest created or changed since then reaches the DR site with the next replica after that. The recovery plan is carried the same way. Guests outside the plan are created at the DR site but not started.
+
+**Test failover (at the DR site; production is not touched)**
+
+```bash
+pvesan dr replicas fa-dr                        # replicas, newest complete one, its age
+pvesan dr test fa-dr fa-prod:pvesan-gold --start 1
+#   ... check the guests, the applications, the timings ...
+pvesan dr cleanup gold-drtest
+```
+
+The test copies the newest complete replica (or `--snapshot <name>`) to new volumes, maps them to this cluster, imports the volume group as `san_gold-drtest` and registers datastore `gold-drtest`. Its guests get new MAC addresses, SMBIOS UUIDs and `-drtest` names, and their network links start down: connect them to an isolated bridge before you set `link_down=0`. If the VM IDs are taken at this site, add `--vmid-offset 10000`: the disks are renamed to match. `cleanup` stops and removes the test guests, the datastore and the copied volumes.
+
+**Planned failover**
+
+1. At the primary site: `pvesan dr prepare-failover gold --confirm gold --shutdown 1`. This shuts the guests down in reverse plan order, writes their configs, unmounts the datastore on every node and sends a final replica `dr-final-<date>-<time>`, then prints the command for the DR site.
+2. At the DR site: `pvesan dr failover fa-dr fa-prod:pvesan-gold --snapshot dr-final-<date>-<time> --confirm fa-prod:pvesan-gold --start 1`.
+
+**Unplanned failover** (the primary site is gone): step 2 alone, from the newest complete replica. Make sure the primary site's guests cannot come back while the DR copies run (fence or power off the primary cluster).
+
+A failover keeps the guests' identities (MACs, UUIDs, VM IDs unless you set an offset) and keeps the storage ID `gold`, so the configs need no changes. The new datastore is linked to the DR array and carries the recovery plan.
+
+**Failing back.** Replicate the DR site's datastore back with `pvesan dr enable gold fa-prod` at the DR site, wait for a complete replica, then run the planned failover in the other direction. Delete the old datastore at the primary site first if its storage ID would clash (`pvesan datastore delete gold --delete-volume 0` keeps the array volume).
+
+**LUNs promoted by hand (any array).** If the array's own tools promoted or copied the replica volumes and they are mapped to the DR cluster, bring them up with `pvesan dr import gold --wwids <wwid>[,<wwid>...]` (add `--test 1` for an isolated test copy). `cleanup` of such a test copy releases the LUNs and leaves their data alone.
+
+**Limits.** Replicas are crash-consistent. Only the current state of a guest is brought up, not its Proxmox snapshots. HA resources, firewall settings outside the guest config, backup jobs and pool membership stay at the primary site and need to be set up at the DR site. Disks on other storages are kept only if that storage exists at the DR site. A CD-ROM image that doesn't exist there is emptied.
+
 ## Troubleshooting and recovery
 
 Start from the task log. Every cluster-wide step prints `[node] FAILED: <reason>`, and that reason is the stderr of the LVM or multipath command, or the array's error message.
@@ -553,6 +597,22 @@ Each `pvesan` command calls the API method in the same row, so `pvesan help <com
 | `pvesan snapshot schedule-show <id>` | `GET datastores/{id}/schedule` | cluster view | |
 | `pvesan copy restore-vm <copy> <vmid>` | `POST datastores/{copy}/restore-vm` | cluster task | `--target-vmid`, `--target-storage` |
 | `pvesan copy remove <copy>` | `POST datastores/{copy}/remove-copy` | cluster task | |
+| `pvesan dr partners <array>` | `GET arrays/{id}/replication-partners` | — | |
+| `pvesan dr enable <id> <partner>` | `POST datastores/{id}/replication` | cluster task | `--interval <min>`, `--retain <h>` |
+| `pvesan dr disable <id>` | `DELETE datastores/{id}/replication` | cluster task | |
+| `pvesan dr status <id>` | `GET datastores/{id}/replication` | cluster view | |
+| `pvesan dr replicate <id>` | `POST datastores/{id}/replicate` | cluster task | `--name`, `--wait` |
+| `pvesan dr write-meta <id>` | `POST datastores/{id}/dr-meta` | cluster task | |
+| `pvesan dr plan <id>` / `set-plan <id> <order>` | `GET` / `PUT datastores/{id}/recovery-plan` | cluster | |
+| `pvesan dr prepare-failover <id>` | `POST datastores/{id}/prepare-failover` | cluster task | `--confirm <id>`, `--shutdown` |
+| `pvesan dr replicas <array>` | `GET arrays/{id}/replicas` | cluster view | |
+| `pvesan dr snapshots <array> <replica>` | `GET arrays/{id}/replicas/{replica}/snapshots` | cluster view | |
+| `pvesan dr test <array> <replica>` | `POST arrays/{id}/replicas/{replica}/test` | cluster task | `--snapshot`, `--storage`, `--vmid-offset`, `--start` |
+| `pvesan dr failover <array> <replica>` | `POST arrays/{id}/replicas/{replica}/failover` | cluster task | as test, `--confirm <replica>` |
+| `pvesan dr import <id> <wwids>` | `POST dr-import` | cluster task | `--test`, `--vmid-offset`, `--start` |
+| `pvesan dr run-plan <id>` | `POST datastores/{id}/run-plan` | cluster task | |
+| `pvesan dr cleanup <id>` | `POST datastores/{id}/dr-cleanup` | cluster task | |
+| `pvesan dr-run` | `POST dr-run` | timer | |
 | `pvesan snapshot-run` | `POST snapshot-run` | timer | |
 | `pvesan reclaim-run` | `POST reclaim-run` | timer | |
 

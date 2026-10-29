@@ -11,7 +11,7 @@ With an array driver it goes one step further, like the Pure Storage or
 INFINIDAT vSphere plugins: **one form creates the volume on the array, maps it
 to the cluster, rescans every node and builds the datastore.**
 
-> **Status: beta.** Everything below is implemented and covered by 718
+> **Status: beta.** Everything below is implemented and covered by 861
 > automated tests, and the plugin runs on a 6-node Proxmox VE 9.2 lab with
 > QLogic and Emulex HBAs. **No array driver has yet been exercised against a
 > real array.** Try each new array type with a small test datastore first, and
@@ -30,6 +30,7 @@ to the cluster, rescans every node and builds the datastore.**
 | Array snapshots | Snapshot a datastore on the array (on a schedule with retention, too), mount a snapshot as a read-only copy datastore, **restore one VM** from it over its disks or into a new VM, roll a whole datastore back (Pure, InfiniBox, PowerStore, NetApp ONTAP, IBM Spectrum Virtualize) |
 | Space | Weekly automatic UNMAP reclaim per datastore; optional discard when a VM disk is deleted |
 | Per-disk volumes (**experimental**) | Storage type `fcsanvol`: every VM disk is its own array volume; snapshots, rollback, templates, linked clones and resize are array operations (Pure) |
+| Disaster recovery (**experimental**) | Replicate a datastore to a second array as one consistent group; its guest configs travel on the datastore; at the DR cluster run a **test failover** (isolated copy) or a **failover**, start guests in recovery-plan order, or import LUNs promoted by hand on any array (replication setup: Pure) |
 
 A datastore is a shared thick-LVM volume group on multipathed LUNs, registered
 as storage type `fcsan` (a subclass of Proxmox's own LVM plugin), so live
