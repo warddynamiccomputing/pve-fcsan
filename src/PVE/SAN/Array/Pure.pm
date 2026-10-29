@@ -338,7 +338,10 @@ sub snapshots {
     my ($self, $vols) = @_;
     return [] if !@$vols;
     my $items = $self->items('/volume-snapshots', { source_names => join(',', @$vols), destroyed => 'false' });
-    return [ sort { ($a->{created} // 0) <=> ($b->{created} // 0) } map { snapshot_from($_) } @$items ];
+    # the replication schedule's own snapshots have numeric suffixes; they
+    # belong to the array's retention, not to pvesan
+    return [ sort { ($a->{created} // 0) <=> ($b->{created} // 0) } grep { $_->{name} !~ /^\d+$/ }
+        map { snapshot_from($_) } @$items ];
 }
 
 sub snapshot_create {
@@ -350,6 +353,14 @@ sub snapshot_create {
         return [ map { snapshot_from($_) } @{$r->{items} // []} ];
     }
 
+    my $pg = $self->ensure_pgroup($vols);
+    $self->call('POST', '/protection-group-snapshots', { source_names => $pg }, { suffix => $name });
+    return [ grep { $_->{name} eq $name && ($_->{group} // '') eq "$pg.$name" } @{$self->snapshots($vols)} ];
+}
+
+# The protection group "pvesan-<first volume>" with exactly these volumes in it.
+sub ensure_pgroup {
+    my ($self, $vols) = @_;
     my $pg = pgroup_name($vols);
     if (!grep { $_->{name} eq $pg } @{$self->items('/protection-groups')}) {
         print "creating protection group '$pg'\n";
@@ -362,8 +373,7 @@ sub snapshot_create {
         print "adding @add to protection group '$pg'\n";
         $self->call('POST', '/protection-groups/volumes', { group_names => $pg, member_names => join(',', @add) }, undef);
     }
-    $self->call('POST', '/protection-group-snapshots', { source_names => $pg }, { suffix => $name });
-    return [ grep { $_->{name} eq $name && ($_->{group} // '') eq "$pg.$name" } @{$self->snapshots($vols)} ];
+    return $pg;
 }
 
 # Destroyed snapshots stay recoverable until the array eradicates them.
@@ -387,6 +397,134 @@ sub snapshot_clone {
 sub snapshot_restore {
     my ($self, $vol, $snap) = @_;
     $self->call('POST', '/volumes', { names => $vol, overwrite => 'true' }, { source => { name => $snap->{id} } });
+}
+
+# --- asynchronous replication (protection group targets) ---
+# (ArrayConnectionsAPI / ArrayConnection, ProtectionGroupsAPI targets and
+# ProtectionGroup replication_schedule / target_retention, ReplicationSchedule,
+# RetentionPolicy, ProtectionGroupSnapshotsAPI replicate_now and transfer,
+# ProtectionGroupSnapshotTransfer; on the target array a replicated group is
+# "SOURCE:PGROUP" and its volume snapshots "SOURCE:PGROUP.SUFFIX.VOLUME", the
+# naming Pure's Ansible module purefa_pgsnap restores from)
+
+sub supports_replication { return 1; }
+
+sub replication_partners {
+    my ($self) = @_;
+    return [ map {
+        {
+            name => (ref($_->{remote}) eq 'HASH' ? $_->{remote}->{name} : undef) // $_->{name},
+            status => $_->{status},
+            type => $_->{type},
+        }
+    } grep { ($_->{type} // 'async-replication') eq 'async-replication' } @{$self->items('/array-connections')} ];
+}
+
+sub replication_enable {
+    my ($self, $vols, $partner, $interval, $retain) = @_;
+    die "no volumes to replicate\n" if !@$vols;
+    die "replication interval must be at least 5 minutes\n" if ($interval // 0) < 300;
+    my ($conn) = grep { $_->{name} eq $partner } @{$self->replication_partners()};
+    die "FlashArray has no replication connection to '$partner'\n" if !$conn;
+    print "WARNING: the connection to '$partner' is $conn->{status}\n" if ($conn->{status} // '') ne 'connected';
+
+    my $pg = $self->ensure_pgroup($vols);
+    my %targets = map { ((ref($_->{member}) eq 'HASH' ? $_->{member}->{name} : '') => 1) }
+        @{$self->items('/protection-groups/targets', { group_names => $pg })};
+    if (!$targets{$partner}) {
+        print "adding '$partner' as replication target of protection group '$pg'\n";
+        $self->call('POST', '/protection-groups/targets', { group_names => $pg, member_names => $partner }, undef);
+    }
+    $self->call('PATCH', '/protection-groups', { names => $pg }, {
+        replication_schedule => { enabled => JSON::PP::true, frequency => $interval * 1000 },
+        target_retention => { all_for_sec => $retain, days => 0, per_day => 0 },
+    });
+    return $pg;
+}
+
+sub replication_disable {
+    my ($self, $vols, $partner) = @_;
+    my $pg = pgroup_name($vols);
+    $self->call('PATCH', '/protection-groups', { names => $pg },
+        { replication_schedule => { enabled => JSON::PP::false } });
+    $self->call('DELETE', '/protection-groups/targets', { group_names => $pg, member_names => $partner }, undef)
+        if defined($partner);
+}
+
+sub replicate_now {
+    my ($self, $vols, $name) = @_;
+    $self->check_snapshot_args($vols, $name);
+    my $pg = $self->ensure_pgroup($vols);
+    $self->call('POST', '/protection-group-snapshots', { source_names => $pg, replicate_now => 'true' }, { suffix => $name });
+    return $name;
+}
+
+sub transfer_from {
+    my ($t) = @_;
+    my ($suffix) = ($t->{name} // '') =~ /\.([^.]+)$/;
+    return {
+        name => $suffix // $t->{name},
+        started => defined($t->{started}) ? int($t->{started} / 1000) : undef,
+        completed => defined($t->{completed}) ? int($t->{completed} / 1000) : undef,
+        progress => $t->{progress},
+        bytes => $t->{data_transferred},
+    };
+}
+
+sub replication_status {
+    my ($self, $vols) = @_;
+    my $pg = pgroup_name($vols);
+    my ($g) = grep { $_->{name} eq $pg } @{$self->items('/protection-groups')};
+    return { group => $pg, partners => [], transfers => [] } if !$g;
+    my $sch = ref($g->{replication_schedule}) eq 'HASH' ? $g->{replication_schedule} : {};
+    my @partners = map { ref($_->{member}) eq 'HASH' ? $_->{member}->{name} : () }
+        @{$self->items('/protection-groups/targets', { group_names => $pg })};
+    my @t = sort { ($b->{started} // 0) <=> ($a->{started} // 0) } map { transfer_from($_) }
+        @{$self->items('/protection-group-snapshots/transfer', { source_names => $pg, destroyed => 'false' })};
+    return {
+        group => $pg,
+        partners => \@partners,
+        enabled => $sch->{enabled} ? 1 : 0,
+        interval => $sch->{frequency} ? int($sch->{frequency} / 1000) : undef,
+        transfers => \@t,
+    };
+}
+
+# Replicated pvesan groups on this (target) array.
+sub replicas {
+    my ($self) = @_;
+    my @res;
+    for my $g (@{$self->items('/protection-groups', { destroyed => 'false' })}) {
+        next if !defined($g->{is_local}) || $g->{is_local};
+        my ($src, $name) = ($g->{name} // '') =~ /^([^:]+):([^:]+)$/ or next;
+        next if $name !~ /^pvesan-/;
+        push @res, { id => $g->{name}, source => $src, group => $name };
+    }
+    return [ sort { $a->{id} cmp $b->{id} } @res ];
+}
+
+sub replica_snapshots {
+    my ($self, $replica) = @_;
+    my %done = map { ($_->{name} // '') => $_ } grep { $_->{completed} }
+        @{$self->items('/protection-group-snapshots/transfer', { source_names => $replica, destroyed => 'false' })};
+    my %members;
+    for my $s (@{$self->items('/volume-snapshots', { destroyed => 'false' })}) {
+        my ($set, $vol) = ($s->{name} // '') =~ /^(\Q$replica\E\.[^.]+)\.([^.]+)$/ or next;
+        next if !$done{$set};
+        push @{$members{$set}}, { id => $s->{name}, volume => $vol, size => $s->{provisioned} };
+    }
+    my @res;
+    for my $set (sort keys %members) {
+        my $t = $done{$set};
+        my ($suffix) = $set =~ /\.([^.]+)$/;
+        push @res, {
+            name => $suffix,
+            created => defined($t->{created}) ? int($t->{created} / 1000) : (defined($t->{started}) ? int($t->{started} / 1000) : undef),
+            completed => int($t->{completed} / 1000),
+            members => [ sort { $a->{volume} cmp $b->{volume} } @{$members{$set}} ],
+        };
+    }
+    return [ sort { $a->{completed} <=> $b->{completed} } @res ];
 }
 
 

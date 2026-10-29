@@ -31,6 +31,7 @@ my @modules = qw(
     PVE::SAN::Array::Eternus
     PVE::SAN::Provision
     PVE::SAN::Snapshot
+    PVE::SAN::DR
     PVE::SAN::Volume
     PVE::Storage::Custom::FCSANPlugin
     PVE::Storage::Custom::FCSANVolPlugin

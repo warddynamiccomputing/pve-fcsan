@@ -18,6 +18,7 @@ use PVE::SAN::Array;
 use PVE::SAN::Datastore;
 use PVE::SAN::Provision;
 use PVE::SAN::Snapshot;
+use PVE::SAN::DR;
 use PVE::SAN::Inventory;
 use PVE::SAN::Monitor;
 use PVE::SAN::Multipath;
@@ -80,7 +81,7 @@ $register->({
     parameters => { additionalProperties => 0, properties => { node => $node_opt } },
     returns => { type => 'array', items => { type => 'object', properties => { name => { type => 'string' } } } },
     code => sub {
-        return [ map { { name => $_ } } qw(adapters array-probe arrays cleanup-paths datastores devices paths policies reclaim-run remote-ports rescan rescan-all snapshot-run sync) ];
+        return [ map { { name => $_ } } qw(adapters array-probe arrays cleanup-paths datastores devices dr-import dr-run paths policies reclaim-run remote-ports rescan rescan-all snapshot-run sync) ];
     },
 });
 
@@ -465,6 +466,8 @@ $register->({
                 volumes => { type => 'string', optional => 1 },
                 copy_of => { type => 'string', optional => 1, description => "Snapshot copy: the datastore it was taken of." },
                 snapshot => { type => 'string', optional => 1, description => "Snapshot copy: the snapshot it shows." },
+                replication => { type => 'string', optional => 1, description => "Partner array the datastore replicates to." },
+                dr => { type => 'string', optional => 1, description => "Brought up from a replica: 'test' or 'failover'." },
             },
         },
     },
@@ -1427,8 +1430,342 @@ $register->({
     },
 });
 
+# --- replication and disaster recovery (experimental) ---
+
+my $replica_opt = {
+    description => "Replica on the DR array, as 'pvesan dr replicas' lists it (e.g. SOURCE:pvesan-gold).",
+    type => 'string',
+    pattern => '[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}',
+};
+my $vmid_offset_opt = {
+    type => 'integer', minimum => 0, maximum => 900_000_000, optional => 1,
+    description => "Add this to every guest's VM ID (when the IDs are taken at this site).",
+};
+my $start_opt = { type => 'boolean', optional => 1, description => "Start the guests in recovery plan order." };
+
+$register->({
+    name => 'replication_partners',
+    path => 'arrays/{array}/replication-partners',
+    method => 'GET',
+    description => "Arrays this array has a replication connection to.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, array => $array_opt } },
+    returns => { type => 'array', items => { type => 'object', properties => {
+        name => { type => 'string' }, status => { type => 'string', optional => 1 }, type => { type => 'string', optional => 1 } } } },
+    code => sub { return PVE::SAN::DR::partners(array => $_[0]->{array}); },
+});
+
+$register->({
+    name => 'replication_get',
+    path => 'datastores/{storage}/replication',
+    method => 'GET',
+    description => "Replication state of a datastore: partner, newest complete replica and its age, transfer in progress.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, storage => $storage_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub { return PVE::SAN::DR::status(storage => $_[0]->{storage}); },
+});
+
+$register->({
+    name => 'replication_enable',
+    path => 'datastores/{storage}/replication',
+    method => 'POST',
+    description => "Replicate the datastore's array volumes to a partner array as one consistent group, and keep its guest configs on the datastore.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            storage => $storage_opt,
+            partner => { type => 'string', pattern => '[A-Za-z0-9][A-Za-z0-9_.-]{0,62}',
+                description => "Partner array, by the name this array knows it as (see replication-partners)." },
+            interval => { type => 'integer', minimum => 5, maximum => 1440, optional => 1,
+                description => "Replicate every N minutes (default 60)." },
+            retain => { type => 'integer', minimum => 1, maximum => 8760, optional => 1,
+                description => "Keep replicas on the partner for N hours (default 24)." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesanrepl', $param->{storage}, sub {
+            PVE::SAN::DR::enable(storage => $param->{storage}, partner => $param->{partner},
+                interval => $param->{interval}, retain => $param->{retain});
+        });
+    },
+});
+
+$register->({
+    name => 'replication_disable',
+    path => 'datastores/{storage}/replication',
+    method => 'DELETE',
+    description => "Stop replicating the datastore. Replicas already on the partner stay there.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, storage => $storage_opt } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesanrepldel', $param->{storage}, sub { PVE::SAN::DR::disable(storage => $param->{storage}); });
+    },
+});
+
+$register->({
+    name => 'replicate_now',
+    path => 'datastores/{storage}/replicate',
+    method => 'POST',
+    description => "Refresh the guest configs on the datastore and send a replica now.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            storage => $storage_opt,
+            name => { %$snapname_opt, optional => 1, description => "Replica name (default: dr-<date>-<time>)." },
+            wait => { type => 'boolean', optional => 1, description => "Wait until the partner has received it." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesanreplnow', $param->{storage}, sub {
+            PVE::SAN::DR::replicate(storage => $param->{storage}, name => $param->{name}, wait => $param->{wait});
+        });
+    },
+});
+
+$register->({
+    name => 'dr_meta_write',
+    path => 'datastores/{storage}/dr-meta',
+    method => 'POST',
+    description => "Write the configs of the datastore's guests and its recovery plan onto the datastore now.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, storage => $storage_opt } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesandrmeta', $param->{storage}, sub { PVE::SAN::DR::write_meta(storage => $param->{storage}); });
+    },
+});
+
+$register->({
+    name => 'recovery_plan_get',
+    path => 'datastores/{storage}/recovery-plan',
+    method => 'GET',
+    description => "Recovery plan of a datastore: the order its guests start in at the DR site.",
+    permissions => { check => $PERM_AUDIT },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, storage => $storage_opt } },
+    returns => { type => 'array', items => { type => 'object', properties => {
+        order => { type => 'integer' }, vmid => { type => 'integer' }, delay => { type => 'integer' }, type => { type => 'string' } } } },
+    code => sub { return PVE::SAN::DR::get_plan(storage => $_[0]->{storage}); },
+});
+
+$register->({
+    name => 'recovery_plan_set',
+    path => 'datastores/{storage}/recovery-plan',
+    method => 'PUT',
+    description => "Set the recovery plan of a datastore.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            storage => $storage_opt,
+            order => { type => 'string', pattern => '(?:\d+(?::\d+)?(?:,\d+(?::\d+)?)*)?', maxLength => 4096,
+                description => "Guests in start order, each optionally with the seconds to wait before the next one: '101:60,102,103'. Empty removes the plan." },
+        },
+    },
+    returns => { type => 'array', items => { type => 'object', properties => {} } },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::DR::set_plan(storage => $param->{storage}, order => $param->{order});
+    },
+});
+
+$register->({
+    name => 'prepare_failover',
+    path => 'datastores/{storage}/prepare-failover',
+    method => 'POST',
+    description => "Planned failover, primary site: stop the datastore's guests, write their configs, unmount the datastore on every node and send a final replica.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            storage => $storage_opt,
+            confirm => { type => 'string', description => "The datastore's storage ID, as confirmation." },
+            shutdown => { type => 'boolean', optional => 1, description => "Shut running guests down (reverse plan order)." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesandrprep', $param->{storage}, sub {
+            PVE::SAN::DR::prepare_failover(storage => $param->{storage}, confirm => $param->{confirm},
+                shutdown => $param->{shutdown});
+        });
+    },
+});
+
+$register->({
+    name => 'replicas',
+    path => 'arrays/{array}/replicas',
+    method => 'GET',
+    description => "Datastores replicated to this (DR) array, with their newest complete replica.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, array => $array_opt } },
+    returns => { type => 'array', items => { type => 'object', properties => {
+        replica => { type => 'string' },
+        source => { type => 'string', optional => 1 },
+        storage => { type => 'string', description => "Storage ID a failover would use." },
+        replicas => { type => 'integer' },
+        latest => { type => 'string', optional => 1 },
+        'latest-time' => { type => 'integer', optional => 1, renderer => 'timestamp' },
+        age => { type => 'integer', optional => 1, renderer => 'duration' },
+        volumes => { type => 'integer', optional => 1 },
+    } } },
+    code => sub { return PVE::SAN::DR::replica_list(array => $_[0]->{array}); },
+});
+
+$register->({
+    name => 'replica_snapshots',
+    path => 'arrays/{array}/replicas/{replica}/snapshots',
+    method => 'GET',
+    description => "Complete replica snapshots of one replica, oldest first.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, array => $array_opt, replica => $replica_opt } },
+    returns => { type => 'array', items => { type => 'object', properties => {
+        name => { type => 'string' },
+        created => { type => 'integer', optional => 1, renderer => 'timestamp' },
+        completed => { type => 'integer', optional => 1, renderer => 'timestamp' },
+        volumes => { type => 'integer' },
+    } } },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::DR::replica_snapshot_list(array => $param->{array}, replica => $param->{replica});
+    },
+});
+
+my $bring_up_props = {
+    node => $node_opt,
+    array => $array_opt,
+    replica => $replica_opt,
+    snapshot => { type => 'string', optional => 1, pattern => '[A-Za-z0-9][A-Za-z0-9-]{0,63}',
+        description => "Replica snapshot to use (default: the newest complete one)." },
+    storage => { %{get_standard_option('pve-storage-id')}, optional => 1,
+        description => "Storage ID to bring the datastore up as (default: the original ID; '<ID>-drtest' for a test)." },
+    'vmid-offset' => $vmid_offset_opt,
+    start => $start_opt,
+};
+
+$register->({
+    name => 'dr_test',
+    path => 'arrays/{array}/replicas/{replica}/test',
+    method => 'POST',
+    description => "Test failover: bring a copy of a replica up under a new name with its guests isolated (new MACs, links down). Production and replication are not touched; remove it with dr-cleanup.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => $bring_up_props },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesandrtest', $param->{replica}, sub {
+            PVE::SAN::DR::from_replica(mode => 'test', array => $param->{array}, replica => $param->{replica},
+                snapshot => $param->{snapshot}, storage => $param->{storage},
+                vmid_offset => $param->{'vmid-offset'}, start => $param->{start});
+        });
+    },
+});
+
+$register->({
+    name => 'dr_failover',
+    path => 'arrays/{array}/replicas/{replica}/failover',
+    method => 'POST',
+    description => "Failover: bring a replica up at this site as the datastore, with its guests' identities kept. Make sure the primary site no longer runs them.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => {
+        %$bring_up_props,
+        confirm => { type => 'string', description => "The replica's name, as confirmation." },
+    } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        die "confirm with the replica's name ('$param->{replica}') to fail over\n" if ($param->{confirm} // '') ne $param->{replica};
+        return $worker->('pvesandrfailover', $param->{replica}, sub {
+            PVE::SAN::DR::from_replica(mode => 'failover', array => $param->{array}, replica => $param->{replica},
+                snapshot => $param->{snapshot}, storage => $param->{storage},
+                vmid_offset => $param->{'vmid-offset'}, start => $param->{start});
+        });
+    },
+});
+
+$register->({
+    name => 'dr_import',
+    path => 'dr-import',
+    method => 'POST',
+    description => "Bring up a replicated datastore from LUNs already presented to this cluster (promoted on the array by hand; works with any array).",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            storage => $storage_opt,
+            wwids => $wwid_list_opt,
+            test => { type => 'boolean', optional => 1, description => "Bring it up as an isolated test copy." },
+            'vmid-offset' => $vmid_offset_opt,
+            start => $start_opt,
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        my $wwids = parse_wwid_list($param->{wwids});
+        return $worker->('pvesandrimport', $param->{storage}, sub {
+            PVE::SAN::DR::import_luns(storage => $param->{storage}, wwids => $wwids,
+                mode => $param->{test} ? 'test' : 'failover', vmid_offset => $param->{'vmid-offset'}, start => $param->{start});
+        });
+    },
+});
+
+$register->({
+    name => 'dr_run_plan',
+    path => 'datastores/{storage}/run-plan',
+    method => 'POST',
+    description => "Start the guests of a datastore brought up from a replica, in recovery plan order.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, storage => $storage_opt } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesandrplan', $param->{storage}, sub { PVE::SAN::DR::run_plan(storage => $param->{storage}); });
+    },
+});
+
+$register->({
+    name => 'dr_cleanup',
+    path => 'datastores/{storage}/dr-cleanup',
+    method => 'POST',
+    description => "Remove a test failover: stop and remove its guests, the datastore and the copied array volumes.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, storage => $storage_opt } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesandrclean', $param->{storage}, sub { PVE::SAN::DR::cleanup(storage => $param->{storage}); });
+    },
+});
+
 # Entry points for the systemd timers; they run on every node and the
 # cluster-wide claim picks one node per job.
+$register->({
+    name => 'dr_run',
+    path => 'dr-run',
+    method => 'POST',
+    description => "Refresh due DR metadata of replicated datastores (called by pvesan-dr.timer).",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub { return PVE::SAN::DR::run_meta_sync(); },
+});
+
 $register->({
     name => 'snapshot_run',
     path => 'snapshot-run',

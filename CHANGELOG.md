@@ -3,6 +3,29 @@
 The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
+## Unreleased
+- Experimental: replication and disaster recovery. Replicate an array
+  datastore to a partner array as one consistent group (`pvesan dr enable`,
+  Pure FlashArray protection group targets with a replication schedule and
+  target retention), send a replica now, and see the newest complete
+  replica and its age (`pvesan dr status`, Disaster recovery tab).
+- Guest configs travel with the data: the configs of every guest with disks
+  on a protected datastore and its recovery plan are written onto the
+  datastore (LV `pvesan-dr-meta`, two checksummed slots) every 15 minutes
+  by `pvesan-dr.timer` and before every replica.
+- Recovery plans: the order guests start in at the DR site, with a delay
+  after each (`pvesan dr set-plan`).
+- DR site: list replicas (`pvesan dr replicas`), test failover (a copy of a
+  replica under `<storage>-drtest`, guests with new MACs and identity and
+  their links down; `pvesan dr cleanup` removes it), failover (guests keep
+  their identity), an optional VM ID offset, and `pvesan dr import` for
+  LUNs promoted on any array by hand.
+- Planned failover from the primary site: shut the guests down in reverse
+  plan order, write their configs, unmount the datastore and send a final
+  replica (`pvesan dr prepare-failover`).
+- Pure FlashArray: the replication schedule's own snapshots no longer show
+  in the datastore's snapshot list.
+
 ## 1.5.0
 - Array snapshots of datastores (Pure FlashArray, INFINIDAT InfiniBox, Dell
   PowerStore): take, list and delete from the new Snapshots tab, the
