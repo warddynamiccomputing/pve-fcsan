@@ -29,6 +29,7 @@ my @modules = qw(
     PVE::SAN::Array::Hitachi
     PVE::SAN::Array::Eternus
     PVE::SAN::Provision
+    PVE::SAN::Snapshot
     PVE::Storage::Custom::FCSANPlugin
     PVE::API2::SAN
     PVE::CLI::pvesan
