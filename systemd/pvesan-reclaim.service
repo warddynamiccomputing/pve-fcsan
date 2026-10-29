@@ -1,0 +1,10 @@
+[Unit]
+Description=Reclaim free space (UNMAP) on pvesan datastores with auto-reclaim
+After=pve-cluster.service
+Requires=pve-cluster.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/pvesan reclaim-run
+Nice=10
+IOSchedulingClass=idle

@@ -314,6 +314,8 @@ sub destroy {
 
     my $storeid = $p{storage};
     my $ds = linked($storeid);
+    my @copies = grep { ($_->{copy_of} // '') eq $storeid } values %{PVE::SAN::Config::load()->{datastores}};
+    die "datastore '$storeid' has mounted snapshot copies - remove them first\n" if @copies;
     my $id = $ds->{array};
     my $hc = PVE::SAN::Array::hostcluster(PVE::SAN::Array::config($id));
     my $drv = PVE::SAN::Array::driver($id); # fail early if the array is unreachable

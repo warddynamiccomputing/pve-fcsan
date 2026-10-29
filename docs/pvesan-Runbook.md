@@ -28,8 +28,9 @@ A pvesan *datastore* is a shared thick LVM volume group on one or more multipath
 | Reclaim space (UNMAP) | Datastores → Reclaim | `pvesan datastore reclaim <id>` |
 | Remove dead paths after unmap | Devices → Clean up dead paths | `pvesan device cleanup` |
 | Array plugin: new datastore on a new volume | Arrays → Provision datastore | `pvesan provision <array> <id> ...` |
+| Array plugin: snapshot, restore VM from snapshot | Snapshots tab; Datastores → Restore VM | `pvesan snapshot ...`, `pvesan copy restore-vm` |
 
-Not in scope: you can't shrink a datastore (vCenter can't either), there is no Storage I/O Control, and there is no automatic resignaturing of snapshot LUNs. The troubleshooting section gives a manual resignature procedure.
+Not in scope: you can't shrink a datastore (vCenter can't either) and there is no Storage I/O Control. Array snapshots, mounting them as copies and restoring VMs from them (P13 to P15) need a driver with snapshot support; for other arrays the troubleshooting section gives a manual resignature procedure.
 
 ## Prerequisites
 
@@ -303,7 +304,62 @@ pvesan provision fs01 gold01 --pool Pool0 --size 2048 --thin 1 --label "Gold 01"
 | Hitachi VSP | `hitachi-vsp` | 443 (embedded) or your Configuration Manager port | Storage Administrator (Provisioning) | `--target-ports` (required, e.g. `CL1-A,CL2-A`); `--system-id` | One host group per target port (host mode LINUX/IRIX) | DP pool | LU path on every target port; WWID known after mapping |
 | Fujitsu ETERNUS DX S5 / AF S3 | `fujitsu-eternus` | 5665 (enable the RESTful API and open the port in the firewall settings) | User with the Admin or StorageAdmin role | — | One FC host per HBA port (`<node>_<n>`) | Thin provisioning pool (TPP) | Firmware V11L40 or later; host affinity enabled on the CA ports; the cluster's hosts must not share a LUN group with other hosts |
 
+**Array snapshots** (P13 to P15) work with `pure`, `infinidat` and `dell-powerstore`. `ibm-sv`, `dell-powermax`, `netapp-ontap`, `netapp-eseries`, `hitachi-vsp` and `fujitsu-eternus` report them as not supported yet.
+
 **First use with a new array type:** before your first production datastore, provision and delete a 10 GiB test datastore. Every driver's calls were checked against the vendor's own SDK or tooling, but real-array results are still being collected. If a step fails, the task log shows the array's own error code; please report it.
+
+### P13. Array snapshots of a datastore
+
+Array snapshots are taken by the array in seconds and cost no host I/O. They work for array-linked datastores on **Pure FlashArray**, **INFINIDAT InfiniBox** and **Dell PowerStore**; the other drivers report "not supported yet". A datastore on several array volumes is snapshotted at one point in time: Pure uses a protection group `pvesan-<first volume>`, InfiniBox a group snapshot. On PowerStore only single-volume datastores can be snapshotted yet.
+
+Snapshots are **crash-consistent**: running VMs are not paused, so their disks look as if the power had been cut at that moment. For application consistency, shut the VM down or quiesce the application first.
+
+GUI: **SAN → Snapshots**, pick the datastore, then **Take snapshot**, **Delete**, **Mount as copy**, **Roll back datastore** or **Schedule**.
+
+```bash
+pvesan snapshot create gold01 --name before-upgrade   # default name pvesan-<date>-<time>
+pvesan snapshot list gold01
+pvesan snapshot delete gold01 before-upgrade
+```
+
+Names use letters, digits and `-` and start with a letter. On the array the snapshot is named `<volume>.<name>` (Pure: `<volume>.<name>` or `<protection group>.<name>.<volume>`). On Pure a deleted snapshot stays recoverable on the array until it is eradicated (24 h by default).
+
+**Schedules.** `pvesan snapshot schedule gold01 --snapshot-interval 4 --snapshot-keep 12` takes a snapshot every 4 hours and keeps the newest 12 scheduled ones. Scheduled snapshots are named `auto-<date>-<time>`; manual snapshots and mounted snapshots are never removed by the schedule. `pvesan-snapshot.timer` runs on every node every 15 minutes, and a claim under the cluster-wide pvesan lock makes sure exactly one node takes each snapshot. `pvesan snapshot schedule-show gold01` shows the last run and its error, if any; remove a schedule with `--delete snapshot-interval`.
+
+### P14. Mount a snapshot and restore a VM
+
+A snapshot is never mounted over the live datastore. **Mount as copy** (`pvesan snapshot mount gold01 before-upgrade`) in one task:
+
+1. Clones the snapshot to a new array volume (`<copy>`), maps it to the cluster and waits until every node sees it.
+2. Imports its volume group under a new name with `vgimportclone`, which gives the PVs and the VG new UUIDs, so it can't collide with the live datastore.
+3. Makes every volume in it read-only and registers it as datastore `<datastore>-snap-<date>-<time>` (or `--copy <id>`).
+
+While the clone is imported (a few seconds), LVM on the other nodes may briefly warn about duplicate PVs; mount copies outside busy periods. All nodes must be online.
+
+**Restore a VM** from the copy (**Datastores → Restore VM**, or the CLI):
+
+```bash
+pvesan copy restore-vm gold01-snap-20261029-0800 101                      # over the live disks
+pvesan copy restore-vm gold01-snap-20261029-0800 101 --target-vmid 9101   # into a new VM
+```
+
+- **Over the live disks:** the VM must be stopped and must not have Proxmox snapshots. Each disk of the VM on the datastore that exists in the snapshot is overwritten with its snapshot content. Disks added after the snapshot are left alone and reported.
+- **Into a new VM ID:** new disks are allocated (on the original datastore, or `--target-storage`), the snapshot content is copied in, and a config is written on the node that runs the task. Disks on other storages and unrestored disks are left out, MAC addresses, the SMBIOS UUID and the VM generation ID are new, and every network link starts down (`link_down=1`), so the copy can't clash with the original. Check the config, then bring the links up.
+
+The VM's configuration is taken from its current config, not from the snapshot. Containers can't be restored this way yet.
+
+When you are done, **Remove copy** (`pvesan copy remove gold01-snap-20261029-0800`) deletes the copy's storage, volume group and clone volume; the snapshot stays. A snapshot that is mounted can't be deleted, and a datastore with mounted copies can't be deleted or rolled back.
+
+### P15. Roll back a whole datastore
+
+`pvesan snapshot rollback gold01 before-upgrade --confirm gold01` (GUI: **Roll back datastore**, type the ID) restores every volume of the datastore in place from the snapshot. **Everything written to the datastore since the snapshot is lost**, for every VM on it.
+
+pvesan refuses unless every guest using the datastore is stopped, every node of the datastore is online and no copy of it is mounted. It then disables the datastore, deactivates its volume group on all nodes, restores the array volumes (PowerStore keeps a backup snapshot of the state before the restore), makes every node re-read the LUNs and enables the datastore again. Guests whose config refers to disks that did not exist at the snapshot are listed as warnings; remove those disk entries before starting them.
+
+### P16. Automatic space reclaim and discard on delete
+
+- **Weekly reclaim:** `pvesan snapshot schedule gold01 --auto-reclaim 1` (GUI: **Snapshots → Schedule → Weekly reclaim**) runs P8 once a week. `pvesan-reclaim.timer` fires on every node on Sunday night; one node that has the datastore claims each run. It works on any datastore whose LUNs support UNMAP, with or without an array driver.
+- **Discard on delete:** `pvesm set gold01 --fc-discard 1` sends UNMAP for a VM disk's blocks just before the disk is removed, so a thin array frees the space at once. It makes deletes slower (the discard runs inside Proxmox's storage lock, which times out after 60 s; for very large disks on a slow array keep it off and rely on the weekly reclaim). It is ignored on datastores with `saferemove`, which already wipe removed disks.
 
 ## Troubleshooting and recovery
 
@@ -333,7 +389,7 @@ cat /etc/pve/pvesan/config.json
 journalctl -u pvesan-sync -u multipathd -b
 ```
 
-**Mount a snapshot or replica LUN (manual resignature).** A copy of a datastore LUN carries the same VG name and PV UUIDs as the original, so don't present it to nodes that see the original until it has a new identity. On one node:
+**Mount a snapshot or replica LUN by hand (manual resignature).** With a driver that supports snapshots, use P14 instead. A copy of a datastore LUN carries the same VG name and PV UUIDs as the original, so don't present it to nodes that see the original until it has a new identity. On one node:
 
 1. Present the copy, then run `pvesan rescan` and `pvesan device add <copy-wwid> --alias ds1-snap`.
 2. Run `vgimportclone --basevgname san_ds1_snap /dev/mapper/ds1-snap` to give it new UUIDs and a new VG name.
@@ -466,6 +522,17 @@ Each `pvesan` command calls the API method in the same row, so `pvesan help <com
 | `pvesan array hosts <id>` | `GET arrays/{id}/hosts` | cluster view | |
 | `pvesan array remove-host <id> <host>` | `POST arrays/{id}/remove-host` | cluster task | |
 | `pvesan provision <array> <storage>` | `POST arrays/{id}/provision` | cluster task | `--pool`, `--size`, `--thin`, `--volume`, `--label`, `--content`, `--policy` |
+| `pvesan snapshot list <id>` | `GET datastores/{id}/snapshots` | cluster view | |
+| `pvesan snapshot create <id>` | `POST datastores/{id}/snapshots` | cluster task | `--name` |
+| `pvesan snapshot delete <id> <name>` | `DELETE datastores/{id}/snapshots/{name}` | cluster task | |
+| `pvesan snapshot mount <id> <name>` | `POST datastores/{id}/snapshots/{name}/mount` | cluster task | `--copy` |
+| `pvesan snapshot rollback <id> <name>` | `POST datastores/{id}/snapshots/{name}/rollback` | cluster task | `--confirm <id>` |
+| `pvesan snapshot schedule <id>` | `PUT datastores/{id}/schedule` | cluster | `--snapshot-interval <h>`, `--snapshot-keep`, `--auto-reclaim`, `--delete` |
+| `pvesan snapshot schedule-show <id>` | `GET datastores/{id}/schedule` | cluster view | |
+| `pvesan copy restore-vm <copy> <vmid>` | `POST datastores/{copy}/restore-vm` | cluster task | `--target-vmid`, `--target-storage` |
+| `pvesan copy remove <copy>` | `POST datastores/{copy}/remove-copy` | cluster task | |
+| `pvesan snapshot-run` | `POST snapshot-run` | timer | |
+| `pvesan reclaim-run` | `POST reclaim-run` | timer | |
 
 There are also two internal steps, `POST devices/{wwid}/detach-local` and `POST vg-deactivate`. Cluster tasks call them on each node; don't call them by hand.
 
@@ -475,6 +542,7 @@ There are also two internal steps, `POST devices/{wwid}/detach-local` and `POST 
 | --- | --- | --- |
 | `fc-wwids` | set at create | WWIDs of the backing LUNs, comma separated |
 | `fc-autorescan` | `1` | Rescan the SAN on activation when a backing LUN is missing |
+| `fc-discard` | `0` | UNMAP a volume's blocks before it is removed (P16); ignored with `saferemove` |
 
 Example entry:
 

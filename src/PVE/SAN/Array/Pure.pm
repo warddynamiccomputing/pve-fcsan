@@ -9,7 +9,10 @@ package PVE::SAN::Array::Pure;
 # Endpoints, parameters and body fields are checked against Pure's
 # generated SDK docs (go-pure-client, flasharray/FA_2_50/docs: VolumesAPI,
 # HostsAPI, HostGroupsAPI, ConnectionsAPI, AuthorizationAPI, VolumePost,
-# VolumePatch, HostPost, Host, ArraySpace, Space).
+# VolumePatch, HostPost, Host, ArraySpace, Space);
+# snapshots: VolumeSnapshotsAPI, VolumeSnapshotPost, VolumeSnapshot,
+# ProtectionGroupsAPI, ProtectionGroupSnapshotsAPI, ProtectionGroupSnapshotPost,
+# VolumesAPI (copy with source + overwrite).
 #
 # FlashArray specifics:
 #  - one capacity pool for the whole array; volumes are always thin
@@ -292,6 +295,98 @@ sub delete_volume {
     my ($self, $vol) = @_;
     $self->call('PATCH', '/volumes', { names => $vol }, { destroyed => JSON::PP::true });
     print "FlashArray volume '$vol' destroyed - recoverable on the array until it is eradicated\n";
+}
+
+# --- snapshots ---
+#
+# One volume: a volume snapshot named VOL.SUFFIX. Several volumes: a
+# protection group "pvesan-<first volume>" holds them and is snapshotted as
+# a whole (PGROUP.SUFFIX, member snapshots PGROUP.SUFFIX.VOL), which is
+# FlashArray's consistent multi-volume snapshot.
+
+sub supports_snapshots { return 1; }
+sub supports_group_snapshots { return 1; }
+
+sub pgroup_name {
+    my ($vols) = @_;
+    my $name = substr("pvesan-$vols->[0]", 0, 63);
+    $name =~ s/-+$//;
+    return $name;
+}
+
+sub snapshot_from {
+    my ($s) = @_;
+    my $full = $s->{name} // '';
+    my $src = ref($s->{source}) eq 'HASH' ? $s->{source}->{name} : undef;
+    my ($name, $group);
+    if (defined($src) && $full =~ /^(.+)\.([^.]+)\.\Q$src\E$/) { # protection group member
+        ($name, $group) = ($2, "$1.$2");
+    } else {
+        $name = $s->{suffix} // ($full =~ /\.([^.]+)$/)[0] // $full;
+    }
+    return {
+        id => $full,
+        name => $name,
+        volume => $src,
+        created => defined($s->{created}) ? int($s->{created} / 1000) : undef,
+        size => $s->{provisioned},
+        group => $group,
+    };
+}
+
+sub snapshots {
+    my ($self, $vols) = @_;
+    return [] if !@$vols;
+    my $items = $self->items('/volume-snapshots', { source_names => join(',', @$vols), destroyed => 'false' });
+    return [ sort { ($a->{created} // 0) <=> ($b->{created} // 0) } map { snapshot_from($_) } @$items ];
+}
+
+sub snapshot_create {
+    my ($self, $vols, $name) = @_;
+    $self->check_snapshot_args($vols, $name);
+
+    if (@$vols == 1) {
+        my $r = $self->call('POST', '/volume-snapshots', { source_names => $vols->[0] }, { suffix => $name });
+        return [ map { snapshot_from($_) } @{$r->{items} // []} ];
+    }
+
+    my $pg = pgroup_name($vols);
+    if (!grep { $_->{name} eq $pg } @{$self->items('/protection-groups')}) {
+        print "creating protection group '$pg'\n";
+        $self->call('POST', '/protection-groups', { names => $pg }, {});
+    }
+    my %in = map { (ref($_->{member}) eq 'HASH' ? $_->{member}->{name} : '') => 1 }
+        @{$self->items('/protection-groups/volumes', { group_names => $pg })};
+    my @add = grep { !$in{$_} } @$vols;
+    if (@add) {
+        print "adding @add to protection group '$pg'\n";
+        $self->call('POST', '/protection-groups/volumes', { group_names => $pg, member_names => join(',', @add) }, undef);
+    }
+    $self->call('POST', '/protection-group-snapshots', { source_names => $pg }, { suffix => $name });
+    return [ grep { $_->{name} eq $name && ($_->{group} // '') eq "$pg.$name" } @{$self->snapshots($vols)} ];
+}
+
+# Destroyed snapshots stay recoverable until the array eradicates them.
+sub snapshot_delete {
+    my ($self, $snap) = @_;
+    if ($snap->{group}) {
+        $self->call('PATCH', '/protection-group-snapshots', { names => $snap->{group} }, { destroyed => JSON::PP::true });
+    } else {
+        $self->call('PATCH', '/volume-snapshots', { names => $snap->{id} }, { destroyed => JSON::PP::true });
+    }
+}
+
+sub snapshot_clone {
+    my ($self, $snap, $name) = @_;
+    die "invalid FlashArray volume name '$name'\n" if !$self->valid_name($name);
+    my $r = $self->call('POST', '/volumes', { names => $name }, { source => { name => $snap->{id} } });
+    my ($v) = @{$r->{items} // []};
+    return $v ? volume_from($v) : $self->volume($name);
+}
+
+sub snapshot_restore {
+    my ($self, $vol, $snap) = @_;
+    $self->call('POST', '/volumes', { names => $vol, overwrite => 'true' }, { source => { name => $snap->{id} } });
 }
 
 1;

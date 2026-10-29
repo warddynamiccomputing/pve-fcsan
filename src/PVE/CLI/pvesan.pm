@@ -133,6 +133,26 @@ our $cmddef = {
     },
 
     provision => [ $api, 'array_provision', ['array', 'storage'], $node, $task ],
+
+    snapshot => {
+        list => [ $api, 'snapshots', ['storage'], $node,
+            $table->(qw(name created size volumes complete auto copy)), $fmt ],
+        create => [ $api, 'snapshot_create', ['storage'], $node, $task ],
+        delete => [ $api, 'snapshot_delete', ['storage', 'name'], $node, $task ],
+        mount => [ $api, 'snapshot_mount', ['storage', 'name'], $node, $task ],
+        rollback => [ $api, 'snapshot_rollback', ['storage', 'name'], $node, $task ],
+        schedule => [ $api, 'schedule_set', ['storage'], $node, $print_obj, $fmt ],
+        'schedule-show' => [ $api, 'schedule_get', ['storage'], $node, $print_obj, $fmt ],
+    },
+
+    copy => {
+        remove => [ $api, 'copy_remove', ['storage'], $node, $task ],
+        'restore-vm' => [ $api, 'copy_restore_vm', ['storage', 'vmid'], $node, $task ],
+    },
+
+    # run by the systemd timers
+    'snapshot-run' => [ $api, 'snapshot_run', [], $node, $print_obj, $fmt ],
+    'reclaim-run' => [ $api, 'reclaim_run', [], $node, $print_obj, $fmt ],
 };
 
 # 'pvesan array add/set --password' prompts instead of taking it on the command line

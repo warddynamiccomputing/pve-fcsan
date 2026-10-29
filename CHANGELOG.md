@@ -4,6 +4,21 @@ The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
 ## Unreleased
+- Array snapshots of datastores (Pure FlashArray, INFINIDAT InfiniBox, Dell
+  PowerStore): take, list and delete from the new Snapshots tab, the
+  `pvesan snapshot` commands or the API. Datastores on several volumes are
+  snapshotted at one point in time (Pure protection group, InfiniBox group
+  snapshot).
+- Mount a snapshot as a read-only copy datastore (clone, map,
+  `vgimportclone` under a new name) and restore one VM from it, over its
+  disks or into a new VM ID; remove the copy afterwards.
+- Roll a whole datastore back to a snapshot in place, with every guest
+  stopped and the volume group deactivated on all nodes.
+- Snapshot schedules with retention (`pvesan-snapshot.timer`, one node per
+  run through a claim in the cluster lock).
+- Weekly automatic space reclaim per datastore (`pvesan-reclaim.timer`) and
+  the `fc-discard` storage option to UNMAP a VM disk when it is deleted.
+- Other drivers report array snapshots as not supported yet.
 - Array view per datastore: pool capacity and use, volume provisioned and
   written space, data reduction and array alerts (Pure; InfiniBox and
   PowerStore partly), cached in the cluster filesystem.

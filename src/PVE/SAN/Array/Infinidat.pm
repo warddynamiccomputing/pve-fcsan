@@ -23,11 +23,17 @@ package PVE::SAN::Array::Infinidat;
 #                     = update of 'size'
 #   scsi_serial.py    serial = 742b0f (IEEE id) + 25 hex digits, no NAA nibble
 #   core/api/api.py   non-GET requests carry ?approved=true; Basic auth works
+#   dataset.py        create_snapshot = POST volumes {name, parent_id[, write_protected]};
+#                     restore = POST volumes/<id>/restore <snapshot id>;
+#                     children by parent_id (filter "parent_id=eq:<id>", core/field_filter.py)
+#   volume.py         create_group_snapshot: POST volumes/group_snapshot
+#                     {snap_prefix, snap_suffix, entities: [{id}]}
 # All paths live in %PATH.
 
 use strict;
 use warnings;
 
+use JSON::PP;
 use MIME::Base64 ();
 
 use base qw(PVE::SAN::Array::Base);
@@ -316,6 +322,83 @@ sub expand_volume {
 sub delete_volume {
     my ($self, $vol) = @_;
     $self->call('DELETE', "$PATH{volumes}/$vol", undef, undef);
+}
+
+# --- snapshots ---
+#
+# InfiniBox snapshots are child volumes (parent_id) named "<volume>.<name>";
+# several volumes are snapshotted at one point in time with
+# volumes/group_snapshot, no consistency group needed. A clone is a
+# writable child of the snapshot.
+
+sub supports_snapshots { return 1; }
+sub supports_group_snapshots { return 1; }
+
+sub snapshot_from {
+    my ($v, $parent_name) = @_;
+    my $name = $v->{name} // '';
+    $name =~ s/^\Q$parent_name\E\.// if defined($parent_name);
+    return {
+        id => $v->{id},
+        name => $name,
+        volume => $v->{parent_id},
+        created => defined($v->{created_at}) ? int($v->{created_at} / 1000) : undef,
+        size => $v->{size},
+    };
+}
+
+sub snapshots {
+    my ($self, $vols) = @_;
+    my @res;
+    for my $id (@$vols) {
+        my $parent = $self->volume($id);
+        push @res, map { snapshot_from($_, $parent->{name}) }
+            grep { uc($_->{type} // 'SNAPSHOT') ne 'MASTER' }
+            @{$self->list($PATH{volumes}, { parent_id => "eq:$id" })};
+    }
+    return [ sort { ($a->{created} // 0) <=> ($b->{created} // 0) } @res ];
+}
+
+sub snapshot_create {
+    my ($self, $vols, $name) = @_;
+    $self->check_snapshot_args($vols, $name);
+
+    if (@$vols == 1) {
+        my $parent = $self->volume($vols->[0]);
+        my ($s) = $self->call('POST', $PATH{volumes}, undef, {
+            name => substr("$parent->{name}.$name", 0, 65),
+            parent_id => $vols->[0] + 0,
+            write_protected => JSON::PP::true,
+        });
+        return [ snapshot_from($s, $parent->{name}) ];
+    }
+
+    my ($res) = $self->call('POST', "$PATH{volumes}/group_snapshot", undef, {
+        snap_suffix => ".$name",
+        entities => [ map { { id => $_ + 0 } } @$vols ],
+    });
+    return [ grep { $_->{name} eq $name } @{$self->snapshots($vols)} ];
+}
+
+sub snapshot_delete {
+    my ($self, $snap) = @_;
+    $self->call('DELETE', "$PATH{volumes}/$snap->{id}", undef, undef);
+}
+
+sub snapshot_clone {
+    my ($self, $snap, $name) = @_;
+    die "invalid volume name '$name'\n" if !$self->valid_name($name);
+    my ($v) = $self->call('POST', $PATH{volumes}, undef, {
+        name => $name,
+        parent_id => $snap->{id} + 0,
+        write_protected => JSON::PP::false,
+    });
+    return volume_from($v);
+}
+
+sub snapshot_restore {
+    my ($self, $vol, $snap) = @_;
+    $self->call('POST', "$PATH{volumes}/$vol/restore", undef, $snap->{id} + 0);
 }
 
 1;

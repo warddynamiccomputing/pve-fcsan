@@ -12,11 +12,18 @@ package PVE::SAN::Array::PowerStore;
 #   host          POST /host {name, os_type, initiators}; PATCH {add_initiators}
 #                 fields: host_group_id, host_initiators
 #   host group    POST /host_group {name, host_ids}; PATCH {add_host_ids}
+#   snapshots     POST /volume/<id>/snapshot {name}; list GET /volume with
+#                 protection_data->>source_id=eq.<id> and type=eq.Snapshot
+#                 (protection.py); DELETE /volume/<snap id>
+#   clone         POST /volume/<id>/clone {name} -> {id}
+#   restore       POST /volume/<id>/restore {from_snap_id, create_backup_snap}
 #
 # PowerStore volumes are always thin; the appliance is one capacity pool.
 
 use strict;
 use warnings;
+
+use JSON::PP;
 
 use base qw(PVE::SAN::Array::Base);
 
@@ -216,6 +223,81 @@ sub expand_volume {
 sub delete_volume {
     my ($self, $vol) = @_;
     $self->call('DELETE', "/volume/$vol", undef, undef);
+}
+
+# --- snapshots (single volume; volume groups are not used yet) ---
+
+sub supports_snapshots { return 1; }
+
+# "2024-05-01T10:20:30.123Z" / "...+00:00" -> epoch
+sub parse_timestamp {
+    my ($ts) = @_;
+    my ($y, $mo, $d, $h, $mi, $s, $tz) = ($ts // '') =~
+        /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.\d+)?(Z|[+-]\d\d:?\d\d)?$/ or return undef;
+    require Time::Local;
+    my $t = Time::Local::timegm($s, $mi, $h, $d, $mo - 1, $y);
+    if ($tz && $tz =~ /^([+-])(\d\d):?(\d\d)$/) {
+        $t -= ($1 eq '-' ? -1 : 1) * ($2 * 3600 + $3 * 60);
+    }
+    return $t;
+}
+
+my $SNAP_FIELDS = 'id,name,size,creation_timestamp,protection_data';
+
+sub snapshot_from {
+    my ($s, $parent_name) = @_;
+    my $name = $s->{name} // '';
+    $name =~ s/^\Q$parent_name\E\.// if defined($parent_name);
+    my $pd = ref($s->{protection_data}) eq 'HASH' ? $s->{protection_data} : {};
+    return {
+        id => $s->{id},
+        name => $name,
+        volume => $pd->{source_id},
+        created => parse_timestamp($s->{creation_timestamp}),
+        size => $s->{size},
+    };
+}
+
+sub snapshots {
+    my ($self, $vols) = @_;
+    my @res;
+    for my $id (@$vols) {
+        my $parent = $self->volume($id);
+        my $list = $self->call('GET', '/volume', {
+            select => $SNAP_FIELDS,
+            'protection_data->>source_id' => "eq.$id",
+            type => 'eq.Snapshot',
+        }) // [];
+        push @res, map { snapshot_from($_, $parent->{name}) } @$list;
+    }
+    return [ sort { ($a->{created} // 0) <=> ($b->{created} // 0) } @res ];
+}
+
+sub snapshot_create {
+    my ($self, $vols, $name) = @_;
+    $self->check_snapshot_args($vols, $name);
+    my $parent = $self->volume($vols->[0]);
+    my $r = $self->call('POST', "/volume/$vols->[0]/snapshot", undef, { name => substr("$parent->{name}.$name", 0, 128) });
+    my $s = $self->call('GET', "/volume/$r->{id}", { select => $SNAP_FIELDS });
+    return [ snapshot_from($s, $parent->{name}) ];
+}
+
+sub snapshot_delete {
+    my ($self, $snap) = @_;
+    $self->call('DELETE', "/volume/$snap->{id}", undef, undef);
+}
+
+sub snapshot_clone {
+    my ($self, $snap, $name) = @_;
+    die "invalid volume name '$name'\n" if !$self->valid_name($name);
+    my $r = $self->call('POST', "/volume/$snap->{id}/clone", undef, { name => $name });
+    return $self->volume($r->{id});
+}
+
+# PowerStore keeps a backup snapshot of the volume's current state.
+sub snapshot_restore {
+    my ($self, $vol, $snap) = @_;
+    $self->call('POST', "/volume/$vol/restore", undef, { from_snap_id => $snap->{id}, create_backup_snap => JSON::PP::true });
 }
 
 1;

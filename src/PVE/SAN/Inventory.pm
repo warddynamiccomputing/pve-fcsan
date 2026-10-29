@@ -217,6 +217,8 @@ sub datastores {
             discard => (@$backing && !grep { !$_->{discard} } @$backing) ? 1 : 0,
             array => $cfg->{datastores}->{$id}->{array},
             volumes => join(',', map { $_->{name} } @{$cfg->{datastores}->{$id}->{volumes} // []}),
+            copy_of => $cfg->{datastores}->{$id}->{copy_of},
+            snapshot => $cfg->{datastores}->{$id}->{snapshot},
         };
     }
     return \@res;

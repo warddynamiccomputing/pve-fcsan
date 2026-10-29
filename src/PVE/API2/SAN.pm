@@ -17,6 +17,7 @@ use PVE::RESTHandler;
 use PVE::SAN::Array;
 use PVE::SAN::Datastore;
 use PVE::SAN::Provision;
+use PVE::SAN::Snapshot;
 use PVE::SAN::Inventory;
 use PVE::SAN::Monitor;
 use PVE::SAN::Multipath;
@@ -79,7 +80,7 @@ $register->({
     parameters => { additionalProperties => 0, properties => { node => $node_opt } },
     returns => { type => 'array', items => { type => 'object', properties => { name => { type => 'string' } } } },
     code => sub {
-        return [ map { { name => $_ } } qw(adapters array-probe arrays cleanup-paths datastores devices paths policies remote-ports rescan rescan-all sync) ];
+        return [ map { { name => $_ } } qw(adapters array-probe arrays cleanup-paths datastores devices paths policies reclaim-run remote-ports rescan rescan-all snapshot-run sync) ];
     },
 });
 
@@ -460,6 +461,10 @@ $register->({
                 wwids => { type => 'string' },
                 lvs => { type => 'integer', optional => 1 },
                 discard => { type => 'boolean' },
+                array => { type => 'string', optional => 1 },
+                volumes => { type => 'string', optional => 1 },
+                copy_of => { type => 'string', optional => 1, description => "Snapshot copy: the datastore it was taken of." },
+                snapshot => { type => 'string', optional => 1, description => "Snapshot copy: the snapshot it shows." },
             },
         },
     },
@@ -1195,6 +1200,255 @@ $register->({
             PVE::SAN::Provision::grow(storage => $param->{storage}, size => $param->{size}, volume => $param->{volume});
         });
     },
+});
+
+# --- array snapshots of datastores ---
+
+my $snapname_opt = {
+    description => "Snapshot name (letters, digits and '-', starting with a letter).",
+    type => 'string',
+    pattern => '[A-Za-z][A-Za-z0-9-]{0,39}',
+};
+
+$register->({
+    name => 'snapshots',
+    path => 'datastores/{storage}/snapshots',
+    method => 'GET',
+    description => "List the array snapshots of an array-linked datastore (one entry per snapshot set).",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, storage => $storage_opt } },
+    returns => {
+        type => 'array',
+        items => {
+            type => 'object',
+            properties => {
+                name => { type => 'string' },
+                created => { type => 'integer', optional => 1, renderer => 'timestamp' },
+                size => { type => 'integer', optional => 1, renderer => 'bytes' },
+                volumes => { type => 'integer' },
+                complete => { type => 'boolean' },
+                auto => { type => 'boolean', description => "Taken by the snapshot schedule." },
+                copy => { type => 'string', optional => 1, description => "Datastore this snapshot is mounted as." },
+            },
+        },
+    },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Snapshot::list(storage => $param->{storage});
+    },
+});
+
+$register->({
+    name => 'snapshot_create',
+    path => 'datastores/{storage}/snapshots',
+    method => 'POST',
+    description => "Take an array snapshot of every volume of the datastore at one point in time (crash-consistent).",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => { node => $node_opt, storage => $storage_opt, name => { %$snapname_opt, optional => 1,
+            description => "Snapshot name (default: pvesan-<date>-<time>)." } },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesansnapshot', $param->{storage}, sub {
+            PVE::SAN::Snapshot::create(storage => $param->{storage}, name => $param->{name});
+        });
+    },
+});
+
+$register->({
+    name => 'snapshot_delete',
+    path => 'datastores/{storage}/snapshots/{name}',
+    method => 'DELETE',
+    description => "Delete an array snapshot of the datastore.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => { node => $node_opt, storage => $storage_opt, name => $snapname_opt },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesansnapdel', $param->{storage}, sub {
+            PVE::SAN::Snapshot::remove(storage => $param->{storage}, name => $param->{name});
+        });
+    },
+});
+
+$register->({
+    name => 'snapshot_mount',
+    path => 'datastores/{storage}/snapshots/{name}/mount',
+    method => 'POST',
+    description => "Mount a snapshot as a separate, read-only copy datastore: clone it on the array, map the clone and import its volume group under a new name.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            storage => $storage_opt,
+            name => $snapname_opt,
+            copy => { %{get_standard_option('pve-storage-id')}, optional => 1,
+                description => "Storage ID of the copy (default: <storage>-snap-<date>-<time>)." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesansnapmount', $param->{storage}, sub {
+            PVE::SAN::Snapshot::mount_copy(storage => $param->{storage}, name => $param->{name}, copy => $param->{copy});
+        });
+    },
+});
+
+$register->({
+    name => 'snapshot_rollback',
+    path => 'datastores/{storage}/snapshots/{name}/rollback',
+    method => 'POST',
+    description => "Restore the whole datastore in place from an array snapshot. Every guest on it must be stopped; the volume group is deactivated on all nodes first. Everything written since the snapshot is lost.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            storage => $storage_opt,
+            name => $snapname_opt,
+            confirm => { type => 'string', description => "The datastore's storage ID, as confirmation." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesanrollback', $param->{storage}, sub {
+            PVE::SAN::Snapshot::rollback(storage => $param->{storage}, name => $param->{name}, confirm => $param->{confirm});
+        });
+    },
+});
+
+$register->({
+    name => 'copy_remove',
+    path => 'datastores/{storage}/remove-copy',
+    method => 'POST',
+    description => "Remove a mounted snapshot copy: its storage, volume group and clone volume(s) on the array.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, storage => $storage_opt } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesancopyremove', $param->{storage}, sub {
+            PVE::SAN::Snapshot::remove_copy(storage => $param->{storage});
+        });
+    },
+});
+
+$register->({
+    name => 'copy_restore_vm',
+    path => 'datastores/{storage}/restore-vm',
+    method => 'POST',
+    description => "Restore a VM's disks from a mounted snapshot copy: over the live disks (VM stopped), or into a new VM ID.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            storage => { %$storage_opt, description => "The snapshot copy datastore." },
+            vmid => get_standard_option('pve-vmid'),
+            'target-vmid' => { %{get_standard_option('pve-vmid')}, optional => 1,
+                description => "Restore into this new VM ID instead of over the live disks." },
+            'target-storage' => { %{get_standard_option('pve-storage-id')}, optional => 1,
+                description => "Storage for the new VM's disks (default: the original datastore)." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        die "'target-storage' needs 'target-vmid'\n" if $param->{'target-storage'} && !$param->{'target-vmid'};
+        return $worker->('pvesanrestorevm', $param->{vmid}, sub {
+            PVE::SAN::Snapshot::restore_vm(
+                storage => $param->{storage},
+                vmid => $param->{vmid},
+                target_vmid => $param->{'target-vmid'},
+                target_storage => $param->{'target-storage'},
+            );
+        });
+    },
+});
+
+my $schedule_props = {
+    'snapshot-interval' => { type => 'integer', minimum => 0, maximum => 8760, optional => 1,
+        description => "Take an array snapshot every N hours (0 = no schedule)." },
+    'snapshot-keep' => { type => 'integer', minimum => 1, maximum => 1000, optional => 1,
+        description => "Scheduled snapshots to keep (default 7); manual snapshots are never removed." },
+    'auto-reclaim' => { type => 'boolean', optional => 1,
+        description => "Reclaim free space (UNMAP) once a week." },
+};
+
+$register->({
+    name => 'schedule_get',
+    path => 'datastores/{storage}/schedule',
+    method => 'GET',
+    description => "Snapshot schedule and weekly reclaim setting of a datastore, with the last run.",
+    permissions => { check => $PERM_AUDIT },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, storage => $storage_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Snapshot::get_schedule(storage => $param->{storage});
+    },
+});
+
+$register->({
+    name => 'schedule_set',
+    path => 'datastores/{storage}/schedule',
+    method => 'PUT',
+    description => "Set the snapshot schedule and the weekly reclaim of a datastore.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            storage => $storage_opt,
+            %$schedule_props,
+            delete => { type => 'string', optional => 1, pattern => '(?:snapshot-interval|auto-reclaim)(?:,(?:snapshot-interval|auto-reclaim))*',
+                description => "Settings to remove." },
+        },
+    },
+    returns => { type => 'object', properties => {} },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Snapshot::set_schedule(
+            storage => $param->{storage},
+            interval => $param->{'snapshot-interval'},
+            keep => $param->{'snapshot-keep'},
+            auto_reclaim => $param->{'auto-reclaim'},
+            delete => $param->{delete},
+        );
+    },
+});
+
+# Entry points for the systemd timers; they run on every node and the
+# cluster-wide claim picks one node per job.
+$register->({
+    name => 'snapshot_run',
+    path => 'snapshot-run',
+    method => 'POST',
+    description => "Run due scheduled snapshots (called by pvesan-snapshot.timer).",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub { return PVE::SAN::Snapshot::run_snapshot_schedules(); },
+});
+
+$register->({
+    name => 'reclaim_run',
+    path => 'reclaim-run',
+    method => 'POST',
+    description => "Run due weekly space reclaims (called by pvesan-reclaim.timer).",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub { return PVE::SAN::Snapshot::run_reclaim(); },
 });
 
 1;

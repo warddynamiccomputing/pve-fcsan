@@ -5,13 +5,15 @@ package PVE::Storage::Custom::FCSANPlugin;
 #
 # All volume handling (alloc, free, resize, snapshots via volume chains on
 # PVE 9, ...) is inherited unchanged from the built-in LVM plugin. This class
-# only adds the binding to the backing LUN WWIDs and makes activation check
-# for, and if needed rescan for, missing LUNs.
+# only adds the binding to the backing LUN WWIDs, makes activation check
+# for, and if needed rescan for, missing LUNs, and can discard removed
+# volumes (fc-discard).
 
 use strict;
 use warnings;
 
 use PVE::Storage::LVMPlugin;
+use PVE::Tools;
 
 use PVE::SAN::Multipath;
 use PVE::SAN::Util;
@@ -49,6 +51,11 @@ sub properties {
             type => 'boolean',
             default => 1,
         },
+        'fc-discard' => {
+            description => "Discard (UNMAP) a volume's blocks before it is removed, so a thin array frees the space at once. Slows deletes; ignored with 'saferemove'.",
+            type => 'boolean',
+            default => 0,
+        },
     };
 }
 
@@ -58,6 +65,7 @@ sub options {
     $opts->{shared} //= { optional => 1 };
     $opts->{'fc-wwids'} = { optional => 1 };
     $opts->{'fc-autorescan'} = { optional => 1 };
+    $opts->{'fc-discard'} = { optional => 1 };
     return $opts;
 }
 
@@ -100,6 +108,23 @@ sub activate_storage {
     }
 
     return $class->SUPER::activate_storage($storeid, $scfg, $cache);
+}
+
+# Opt-in discard of a removed volume (fc-discard). With saferemove PVE
+# already wipes the volume, so nothing is added then. A discard that fails
+# (LUN without UNMAP) only warns; the removal goes on.
+sub free_image {
+    my ($class, $storeid, $scfg, $volname, $isBase, $format) = @_;
+
+    if ($scfg->{'fc-discard'} && !$scfg->{saferemove} && $volname =~ m/^[A-Za-z0-9_.+-]+$/) {
+        my $lv = "$scfg->{vgname}/$volname";
+        eval {
+            PVE::Tools::run_command(['lvchange', '-ay', $lv]);
+            PVE::Tools::run_command(['blkdiscard', "/dev/$lv"], timeout => 3600);
+        };
+        warn "storage '$storeid': discard of $volname failed - $@" if $@;
+    }
+    return $class->SUPER::free_image($storeid, $scfg, $volname, $isBase, $format);
 }
 
 1;
