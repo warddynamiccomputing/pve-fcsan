@@ -42,7 +42,7 @@ flowchart TB
     API --> OPS["Node-local steps · PVE::SAN::Ops<br/>rescan, sync, refresh, cleanup, detach-local, vg-deactivate"]
     API --> DS["Cluster tasks · PVE::SAN::Datastore / Provision / Snapshot<br/>create, extend, rename, mount, delete, reclaim, provision, snapshots"]
     DS -- "pvesh to every node" --> API
-    DS --> ARR["Array drivers · PVE::SAN::Array::*<br/>IBM, Pure, InfiniBox, Dell, NetApp, Hitachi, Fujitsu"]
+    DS --> ARR["Array drivers · PVE::SAN::Array::*<br/>IBM, Pure, InfiniBox, Dell, NetApp, Hitachi, Fujitsu, HPE"]
     OPS --> SYS["Sysfs + Inventory"]
     OPS --> MP["Multipath"]
     OPS --> LVM["LVM"]
@@ -171,6 +171,7 @@ Array drivers turn pvesan from a SAN manager into a provisioning tool. The array
 | Hitachi VSP | `/ConfigurationManager/v1/objects/storages/<id>`, session token, jobs awaited | OpenStack Cinder Hitachi driver, Configuration Manager reference | One host group per target port; LU path on each | `naaId` (known after mapping) |
 | Fujitsu ETERNUS DX S5 / AF S3 | `:5665/api/v1/...`, `POST session` → Bearer token, jobs awaited and deleted | ETERNUS RESTful API Reference (P3AG-5492) | One FC host per WWN (the API has no host groups); every volume connected to all of them with one host LUN | `3` + `uid` |
 | HPE Alletra 5000 / 6000 (Nimble) | `:5392/v1/...`, `POST tokens` `{data: {username, password}}` → `X-Auth-Token`; bodies wrapped in `{data}`, asynchronous jobs awaited | HPE nimble-python-sdk, OpenStack Cinder Nimble driver | One FC initiator group; volume presented by an access control record | `2` + `serial_number` (EUI-64; HPE common-host-libs) |
+| HPE Primera / Alletra 9000 / 3PAR | `/api/v1/...`, `POST credentials` → `X-HP3PAR-WSAPI-SessionKey`, session deleted afterwards | HPE python-3parclient, OpenStack Cinder 3PAR driver | Host set (persona 2, Generic-ALUA); one VLUN per volume to `set:<host set>` with an automatic LUN | `3` + `wwn` |
 
 ### Array snapshots and copies
 
@@ -184,6 +185,7 @@ Array drivers turn pvesan from a SAN manager into a provisioning tool. The array
 | NetApp ONTAP | `POST storage/volumes/<flexvol>/snapshots` `{name}` (the LUN's own FlexVol) | Not yet (consistency groups) | FlexClone `POST storage/volumes` `{clone.parent_volume.name, clone.parent_snapshot.name, clone.is_flexclone}`; its `lun0` | `PATCH storage/volumes/<flexvol>` `{restore_to.snapshot.name}` | NetApp Ansible (`na_ontap_snapshot`, `na_ontap_volume`, `na_ontap_volume_clone`) |
 | IBM Spectrum Virtualize | Thin target `pvs_<vol id>_<name>`, `mkfcmap -copyrate 0`, `prestartfcmap`, `startfcmap` | FlashCopy consistency group `pvs_<name>_<first id>` (`mkfcconsistgrp`, `startfcconsistgrp`) | Thin volume fed by `mkfcmap -copyrate 50 -autodelete` from the snapshot | `mkfcmap` snapshot → volume, `prestartfcmap -restore`, `startfcmap -restore` | OpenStack Cinder Storwize/SVC driver (`storwize_svc_common.py`) |
 | HPE Alletra 5000 / 6000 (Nimble) | `POST snapshots` `{name, vol_id}` | Volume collection `pvesan-<vol>` (`PUT volumes/<id>` `{volcoll_id}`), `POST snapshot_collections` `{name, volcoll_id}`, deleted as a whole | `POST volumes` `{clone: true, base_snap_id, inherit_acl: false}` | Volume offline, `POST volumes/<id>/actions/restore` `{base_snap_id}`, online again | nimble-python-sdk (`volumes.py`, `snapshots.py`, `volume_collections.py`, `snapshot_collections.py`), Cinder Nimble driver |
+| HPE Primera / Alletra 9000 / 3PAR | Virtual copy: `POST volumes/<vol>` `{action: createSnapshot, parameters: {name, comment}}`, the pvesan name in the comment | Volume set `pvesan-<vol>`, `POST volumesets/<set>` `{action: createSnapshot}` with `<base>-@count@` | Online physical copy `POST volumes/<snap>` `{action: createPhysicalCopy, parameters: {destVolume, destCPG, online}}` | `PUT volumes/<snap>` `{action: 4}` (promote virtual copy, online), task awaited | python-3parclient (`client.py`), OpenStack Cinder (`hpe_3par_common.py`) |
 
 A **snapshot set** is every array snapshot with the same pvesan name across the datastore's volumes (`group_sets`); a set missing a volume is listed as incomplete and can't be mounted or rolled back. A group snapshot (Pure protection group) is deleted once, not per member.
 
@@ -308,7 +310,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 
 **Layers.** `Util`, `Sysfs`, `Multipath` (parsing/rendering) and `LVM` (parsing) are pure Perl and read sysfs through `PVESAN_SYSFS_ROOT`, so a fixture tree replaces `/sys`. `Inventory`, `Ops`, `Config` and `Cluster` add Proxmox VE and command execution; `Datastore` and `Provision` compose them; `API2::SAN` exposes them; the CLI and GUI sit only on the API.
 
-**Tests** (`make test`, 956 checks):
+**Tests** (`make test`, 969 checks):
 
 | File | Covers |
 | --- | --- |
@@ -322,8 +324,10 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 | `t/69-monitor.t` | I/O rates, path problems and learned path counts, alert differences, pool and health problems, zoning hints, new and stale hosts, `no_path_retry` rendering, the monitoring primitives of Pure, InfiniBox and PowerStore, and the monitor run (lease, registration, alerts sent once) |
 | `t/70-volumes.t` | `fcsanvol`: names and aliases, Pure's per-disk primitives, allocation with rollback on failure, the LUN limit, targeted activation, resize, snapshots, rollback, templates, linked clones, delete, and the plugin's features |
 | `t/71-dr.t` | DR metadata slots (checksum, generations, torn slots), recovery plans, VM ID offsets and disk renames, guest configs for test and failover (VMs and containers), the metadata timer job, Pure's replication primitives against a fake array, and the replicate, planned-failover, test-failover, cleanup, failover and manual-import workflows against a fake driver |
+| `t/73-hpe3par.t` | HPE Primera / Alletra 9000 / 3PAR against a stateful fake WSAPI: session key, re-login and logout, error format, CPG capacity, host set registration with persona and ports, host set VLUNs, the full volume lifecycle, virtual copies and volume set snapshots (the array's own copies hidden), online copies, promote with its task, and volume set clean-up |
 | `t/72-snapshots-more.t` | Snapshots on NetApp ONTAP (FlexVol snapshots, FlexClone copies, restore, its own snapshots hidden, layout and serial checks) and IBM Spectrum Virtualize (FlashCopy targets, consistency groups, background copies, restore, clean-up after a failure) against stateful fake arrays |
 | `t/76-nimble.t` | HPE Alletra 5000/6000 (Nimble) against a stateful fake NimOS array: token login and re-login, `{data}` request bodies, paged lists, asynchronous jobs, the FC initiator group, WWID from the serial, the volume lifecycle (offline before delete), snapshots, volume and snapshot collections, clones, restore, error formats |
+| `t/74-hardening.t` | `fc-discard` handing off to the LVM plugin's background discard (and the inline fallback), container configs and restore from a snapshot copy |
 | `t/80-integrate.t` | `pvesan-integrate` against a fake pve-manager tree: insertion point, upgrade from an older line, refusal without the anchor, exact removal, and that the patched `Nodes.pm` still loads with a broken pve-fcsan |
 | `t/90-compile.t` | Loads every module; fails on compile warnings. Uses the real Proxmox VE libraries when present, stubs otherwise |
 
@@ -364,13 +368,12 @@ The build also checks that every Proxmox function the code calls exists in the i
 | Code in pve-storage or qemu-server that tests `type eq 'lvm'` | An `fcsan` storage could miss an LVM-specific branch | Snapshot, clone and migrate a VM on `fcsan`; fall back by changing the type to `lvm` |
 | `Nodes.pm` anchor text changes | The integration can't find its insertion point | `pvesan-integrate apply` reports it and changes nothing |
 | Widget-toolkit API drift | GUI classes could change in a new Proxmox VE | Open the panel after upgrades; check the browser console |
-| Duplicate PVs while a copy is imported | Between mapping a clone and `vgimportclone`, LVM on other nodes sees two PVs with the same UUID and may refuse metadata changes on the source VG for those seconds | Mount copies outside busy periods; the task log shows the import step |
 | DR replicas never brought up on real arrays | Pure's replication calls are checked against Pure's SDK docs only; target-side naming follows Pure's Ansible module | Run a test failover with a test datastore before relying on it |
 
 **Functional limits compared with vCenter**
 
 - Thick LVM only at the datastore layer (the array can still be thin). Per-VM snapshots on shared storage need Proxmox VE 9 volume chains.
-- Array snapshots, copies and restores need a driver with snapshot support (Pure, InfiniBox, PowerStore, ONTAP, IBM Spectrum Virtualize); for other arrays snapshot or replica LUNs are imported by hand (`vgimportclone` procedure in the runbook). Snapshots are crash-consistent; VMs are not frozen.
+- Array snapshots, copies and restores need a driver with snapshot support (Pure, InfiniBox, PowerStore, ONTAP, IBM Spectrum Virtualize, HPE 3PAR); for other arrays snapshot or replica LUNs are imported by hand (`vgimportclone` procedure in the runbook). Snapshots are crash-consistent; VMs are not frozen.
 - No Storage I/O Control, datastore clusters, Storage DRS or datastore browser. Datastores can't be shrunk.
 - Nodes offline during a change catch up at boot through `pvesan-sync.service`.
 
