@@ -73,8 +73,8 @@ State lives in three places, each with one owner; each node renders a fourth fro
 | Store | Location | Holds | Written by |
 | --- | --- | --- | --- |
 | Storage registry | `/etc/pve/storage.cfg` (pmxcfs) | `fcsan` entry: `vgname`, `shared`, `nodes`, `disable`, `fc-wwids`, `fc-autorescan`, `fc-discard` | Proxmox VE storage API (`PVE::API2::Storage::Config`) |
-| pvesan cluster DB | `/etc/pve/pvesan/config.json` (pmxcfs) | Per WWID: `alias`, `policy`, `detached`, `datastore`. Per datastore: `label`, linked `array` and `volumes`; for a snapshot copy `copy_of` and `snapshot`; `snapshot_schedule`, `auto_reclaim` and job state. Per array: type, address, user, fingerprint, vendor settings | `PVE::SAN::Config::update` under the `pvesan` cfs domain lock |
-| Array secrets | `/etc/pve/priv/pvesan/<array>.pw` | Password or API token | Root only |
+| pvesan cluster DB | `/etc/pve/pvesan/config.json` (pmxcfs) | Per WWID: `alias`, `policy`, `detached`, `datastore`. Per datastore: `label`, linked `array` and `volumes`; for a snapshot copy `copy_of` and `snapshot`; `snapshot_schedule`, `auto_reclaim` and job state. Per array: type, address, user, fingerprint, vendor settings. Per fabric (FC switch): type, address, user, fingerprint, `vsan`, `vf_id`, `zoneset` | `PVE::SAN::Config::update` under the `pvesan` cfs domain lock |
+| Array secrets | `/etc/pve/priv/pvesan/<array>.pw` | Password or API token (switches: `fabric-<id>.pw`) | Root only |
 | Monitor cache | `/etc/pve/pvesan/monitor.json` (pmxcfs) | Array views per datastore, array problems, lease, member list per array | `PVE::SAN::Monitor` under the `pvesan` domain lock |
 | LVM metadata | On the LUNs | VG, PVs, LVs | LVM commands, only under `cluster_lock_storage` |
 | Rendered, per node | `/etc/multipath/conf.d/pvesan.conf`, `/etc/multipath/wwids`, LVM devices file | Aliases, policies, blacklist of detached WWIDs, claimed WWIDs | `PVE::SAN::Ops::sync` |
@@ -252,6 +252,23 @@ A **snapshot set** is every array snapshot with the same pvesan name across the 
 
 **Planned failover** (`prepare_failover`): shut guests down in reverse plan order (guests outside the plan first), refuse while any still runs, write the metadata, unmount the datastore cluster-wide (VG deactivated on every node), send `dr-final-<date>-<time>` and wait until the partner reports it complete.
 
+### Automatic FC zoning
+
+| Module | Role |
+| --- | --- |
+| `PVE::SAN::Fabric` | Registry of FC switches (one per fabric, VSAN or virtual fabric) in the cluster DB under `fabrics`; passwords in `/etc/pve/priv/pvesan/fabric-<id>.pw`; same certificate pinning as arrays |
+| `PVE::SAN::Fabric::Base` | Switch driver contract and shared HTTPS client |
+| `PVE::SAN::Fabric::Brocade` | FOS REST API (8.2.1+): one session per call (`/rest/login`, `/rest/logout`), `brocade-name-server`, `brocade-zone` defined and effective configuration |
+| `PVE::SAN::Fabric::Cisco` | MDS NX-API `ins_api`: `show fcns database detail`, `show zone`, `show zoneset [active]`, `show zone status`, zoning config commands |
+| `PVE::SAN::Zoning` | Plan and apply single-initiator zones between the nodes and an array |
+
+**Driver contract.** A switch driver implements `system_info`, `name_server` (every logged-in N_Port: WWPN, WWNN, role, symbolic name), `zoning` (active zone set, defined zone sets with their zones, defined zones and active zones with aliases resolved to WWPNs, and whether another change is open) and `apply_zones($zoneset, \@zones)`. An array driver opts in by reporting its FC ports with `target_ports`: IBM `lstargetportfc` rows with `host_io_permitted=yes` (the NPIV ports when there are any), InfiniBox `components/nodes` FC ports that are up (as Cinder's `infinidat.py`), Pure `ports`, HPE WSAPI `ports`.
+
+**Planning** (`Zoning::compute`, pure and unit tested). For each fabric, the node ports and array ports in its name server are the ones to pair. For each node port the zone `pve_<host cluster>_<node>_<WWPN>_<array>` should hold that port and every array port on the same fabric. If an active zone (any name) already holds all of them, nothing changes. If the pvesan zone exists, the missing members are added; otherwise it is created. The zone set is the fabric's `zoneset` setting or the active one. A fabric is blocked when another change is open, when no zone set is known, or when the defined zone set differs from the active one (activating would also push someone else's saved changes). The plan also reports node ports and array ports on no fabric, and nodes reached by only one fabric.
+
+**Applying** recomputes the plan from live data, refuses any blocked fabric before it touches any, then per fabric creates or extends the zones, adds new zones to the zone set and activates it. Brocade: zone and cfg `POST`s open a transaction; `PATCH effective-configuration/cfg-name/<cfg>` with the current checksum saves and enables it; on any error `cfg-action/4` aborts the transaction. Cisco: one `cli_conf` batch (`zone name`, `member pwwn`, `zoneset name`, `member`, `zoneset activate`, and `zone commit` in enhanced mode); on error `no zone commit` discards an enhanced-mode session; the running configuration is then saved. pvesan never removes or renames zones.
+
+
 ## Consistency, locking, safety, permissions
 
 The one invariant: **only one node at a time writes LVM metadata for a shared VG, and every node sees the same device size before LVM is told about it.**
@@ -327,7 +344,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 
 **Layers.** `Util`, `Sysfs`, `Multipath` (parsing/rendering) and `LVM` (parsing) are pure Perl and read sysfs through `PVESAN_SYSFS_ROOT`, so a fixture tree replaces `/sys`. `Inventory`, `Ops`, `Config` and `Cluster` add Proxmox VE and command execution; `Datastore` and `Provision` compose them; `API2::SAN` exposes them; the CLI and GUI sit only on the API.
 
-**Tests** (`make test`, 1250 checks):
+**Tests** (`make test`, 1319 checks):
 
 | File | Covers |
 | --- | --- |
@@ -346,6 +363,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 | `t/75-unity.t` | Dell Unity XT against a stateful fake array: CSRF token and session cookie, request bodies, one host per node with WWNN:WWPN initiators, the volume lifecycle, host access lists, snapshots, thin clones, restore, consistency groups and the error format |
 | `t/75-iscsi.t` | iSCSI names, the node's initiator name, portal parsing, the exact `iscsiadm` discovery, `node.startup` and login commands (idempotent, partial failures), boot restore, node ports per protocol, refusal by drivers without iSCSI, and each driver's iSCSI host bodies and target portals against fake arrays |
 | `t/76-nimble.t` | HPE Alletra 5000/6000 (Nimble) against a stateful fake NimOS array: token login and re-login, `{data}` request bodies, paged lists, asynchronous jobs, the FC initiator group, WWID from the serial, the volume lifecycle (offline before delete), snapshots, volume and snapshot collections, clones, restore, error formats |
+| `t/77-zoning.t` | Automatic zoning: the plan (zones created, extended or left alone, names, members per fabric, zone set membership, blocked fabrics, unplaced ports, redundancy), Brocade FOS REST (session, vf-id, name server, aliases, cfg enable with checksum, abort on error) and Cisco NX-API (fcns and zone parsing, enhanced-mode commit and discard, open session) against fake switches, IBM and InfiniBox FC target ports |
 | `t/74-hardening.t` | `fc-discard` handing off to the LVM plugin's background discard (and the inline fallback), container configs and restore from a snapshot copy |
 | `t/80-integrate.t` | `pvesan-integrate` against a fake pve-manager tree: insertion point, upgrade from an older line, refusal without the anchor, exact removal, and that the patched `Nodes.pm` still loads with a broken pve-fcsan |
 | `t/90-compile.t` | Loads every module; fails on compile warnings. Uses the real Proxmox VE libraries when present, stubs otherwise |
@@ -388,6 +406,7 @@ The build also checks that every Proxmox function the code calls exists in the i
 | `Nodes.pm` anchor text changes | The integration can't find its insertion point | `pvesan-integrate apply` reports it and changes nothing |
 | Widget-toolkit API drift | GUI classes could change in a new Proxmox VE | Open the panel after upgrades; check the browser console |
 | DR replicas never brought up on real arrays | Pure's replication calls are checked against Pure's SDK docs only; target-side naming follows Pure's Ansible module | Run a test failover with a test datastore before relying on it |
+| Switch drivers never run against real switches | Brocade and Cisco calls follow the vendors' API references and Broadcom's Ansible collection; NX-API show output field names vary by NX-OS release | `pvesan array zone-plan` first (read-only), then zone a test array on one fabric with a zoning backup |
 
 **Functional limits compared with vCenter**
 

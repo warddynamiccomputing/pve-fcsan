@@ -202,6 +202,19 @@ sub host_clusters {
     return [ map { { id => $_->{id}, name => $_->{name}, status => $_->{status} } } @{$self->list('lshostcluster')} ];
 }
 
+# FC ports hosts are zoned to: lstargetportfc rows with host_io_permitted=yes
+# (SCSI, not NVMe). With NPIV on, those are the virtual ports; while NPIV is
+# in transitional mode the physical ports also allow host I/O, but hosts
+# belong on the virtual ones, so those win when there are any.
+sub target_ports {
+    my ($self) = @_;
+    my @p = grep { ($_->{host_io_permitted} // '') eq 'yes' && ($_->{protocol} // 'scsi') eq 'scsi' }
+        @{$self->list('lstargetportfc')};
+    my @virtual = grep { ($_->{virtualized} // '') eq 'yes' } @p;
+    @p = @virtual if @virtual;
+    return [ sort grep { defined } map { PVE::SAN::Array::Base::norm_wwpn($_->{WWPN}) } @p ];
+}
+
 sub volume_from {
     my ($v) = @_;
     my $uid = $v->{vdisk_UID} // '';

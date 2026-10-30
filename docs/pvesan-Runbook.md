@@ -44,7 +44,7 @@ Every cluster node needs the same LUNs, presented the same way, before pvesan ca
 
 **Fabric and array**
 
-1. Zone each node's HBA ports (WWPNs) to the array target ports. Single-initiator zoning is best practice. Get the WWPNs with `pvesan adapters` or from the GUI **Adapters** tab.
+1. Zone each node's HBA ports (WWPNs) to the array target ports. Single-initiator zoning is best practice. Get the WWPNs with `pvesan adapters` or from the GUI **Adapters** tab. On Brocade and Cisco MDS fabrics pvesan can create the zones for you (P20).
 2. Put every node's WWPNs in one host group / host cluster on the array, with the same LUN ID on every node. With an array driver, pvesan does this for you (P12).
 3. Turn on ALUA on the array if it supports it.
 4. Use thin LUNs with UNMAP turned on if you want space reclaim.
@@ -492,6 +492,62 @@ Every portal a node logs in to is recorded in `/etc/pve/pvesan/config.json` (`is
 | `no iSCSI session to portal ... could be established` | Check the network path, CHAP, and that the host object holds this node's initiator name (`pvesan array hosts <array>`). |
 | LUN not visible after login | Check the host is in the host cluster (`pvesan array status`), then `pvesan rescan`. |
 
+### P20. Automatic zoning (Brocade, Cisco MDS)
+
+pvesan can zone the array to the cluster for you. It reads each node's HBA ports, the array's FC target ports and every switch's name server, then plans **single-initiator zones**: on each fabric, one zone per node port that is logged in there, holding that port and the array ports on the same fabric. You see the plan before anything changes.
+
+> Not yet run against a real switch: the switch drivers follow the Brocade FOS REST API reference and Broadcom's Ansible collection, and the Cisco MDS NX-OS configuration guide. Try it first on a fabric where a zoning mistake does no harm, and keep a backup of the zoning configuration (`cfgshow` / `show zoneset`).
+
+**Before you start**
+
+1. Cable each node and the array to both fabrics and make sure the ports are logged in (the switch's `nsshow` / `show fcns database`).
+2. Brocade: Fabric OS 8.2.1 or later with the REST interface on (`mgmtapp --show`), and a user with the zoneadmin or admin role. Add one switch per fabric (or per virtual fabric, with `--vf-id`). pvesan talks HTTPS, so the switch needs an HTTPS certificate (`seccertmgmt show -all`); after a factory reset create one if none is listed (`seccertmgmt generate -cert https -type rsa`, or install your CA-signed one).
+3. A fabric with no zoning yet (a new or factory-reset switch) has no active zone set: give one with `--zoneset <name>` and pvesan creates it with the first zones and activates it. Once a zone set is active, only zoned ports can talk to each other.
+4. Cisco MDS: `feature nxapi`, and a user with the network-admin role. Add one entry per VSAN (`--vsan`). Basic and enhanced zoning both work; in enhanced mode pvesan commits the session itself.
+5. The array must report its FC ports: `ibm-sv`, `infinidat`, `pure` and `hpe-3par` do. For the other types give them with `--targets`.
+
+**Add the switches**
+
+```bash
+pvesan fabric probe 192.0.2.30                # read the certificate fingerprint, check it on the switch
+pvesan fabric add fab-a --type brocade --address 192.0.2.30 --username pvesan --fingerprint 'sha256$...'
+pvesan fabric add fab-b --type cisco --address 192.0.2.31 --username pvesan --vsan 20 --fingerprint 'sha256$...'
+pvesan fabric status fab-a                    # every logged-in port, with the node or array it belongs to
+```
+
+In the GUI: **SAN → Fabrics → Add**. The zones go into the zone set that is active on the fabric. Set `--zoneset` if none is active yet, or to use another one.
+
+**Zone an array**
+
+```bash
+pvesan array zone-plan fs01                   # what would change, per fabric
+pvesan array zone fs01                        # create the zones, add them to the zone set, activate it
+pvesan array register-cluster fs01            # then register the hosts (P12)
+```
+
+In the GUI, after **Arrays → Add**, pvesan asks whether to zone the new array when switches are configured; **Arrays → Auto-zone** opens the same plan at any time. **Apply** runs the zoning task and then offers to register the cluster's hosts.
+
+Zones are named `pve_<host cluster>_<node>_<node WWPN>_<array>`. A node port that an active zone already pairs with all of the fabric's array ports (pvesan's or one you made) is left alone. A pvesan zone that lacks a port is extended. Running it again changes nothing; run it after adding a node or an HBA.
+
+**What pvesan refuses**
+
+- A fabric where another zoning change is open (Brocade transaction, Cisco enhanced-zoning session).
+- A zone set with saved changes that are not active yet: activating it would also activate those. Activate or discard them on the switch first.
+- A fabric with no active zone set and no `--zoneset`.
+
+If the switch rejects a change, pvesan aborts the Brocade transaction or discards the Cisco enhanced-mode session, so the fabric stays as it was. In Cisco basic mode, zones defined before the error stay defined but are not activated. pvesan never removes zones.
+
+**Troubleshooting**
+
+| Symptom | Fix |
+| --- | --- |
+| `array type '...' cannot list its FC target ports yet` | `pvesan array zone-plan fs01 --targets 50:05:...,50:05:...` (the array's FC WWPNs) |
+| `none of the array's ports is logged in to this fabric` | Check the array's cabling and port state; `pvesan fabric status <fabric>` lists what the switch sees |
+| `node port(s) logged in to none of the fabrics` | The HBA is down, uncabled, or on a switch pvesan doesn't know |
+| `only one fabric reaches node(s) ...` | That node has no path redundancy: cable its second HBA port to the other fabric |
+| `switch login ... failed (HTTP 401)` | Check the user and password (`pvesan fabric set <fabric> --password`) |
+
+
 ## Troubleshooting and recovery
 
 Start from the task log. Every cluster-wide step prints `[node] FAILED: <reason>`, and that reason is the stderr of the LVM or multipath command, or the array's error message.
@@ -583,7 +639,7 @@ Every node checks that each LUN of each enabled datastore it should see is prese
 
 ### H6. Zoning hints
 
-**Arrays → Zoning** (`pvesan array zoning fs01`) compares the array's FC target ports with the ports each node's adapters are logged in to, and names what is missing: an adapter logged in to none of the array's ports (zone missing on that fabric), or a node that reaches some array ports but not others. The array's ports come from the array where the driver can read them (`pure`); otherwise from the target ports that any node uses to reach the array's LUNs. pvesan does not change the switches.
+**Arrays → Zoning** (`pvesan array zoning fs01`) compares the array's FC target ports with the ports each node's adapters are logged in to, and names what is missing: an adapter logged in to none of the array's ports (zone missing on that fabric), or a node that reaches some array ports but not others. The array's ports come from the array where the driver can read them (`ibm-sv`, `infinidat`, `pure`, `hpe-3par`); otherwise from the target ports that any node uses to reach the array's LUNs. The hints don't change the switches; to have pvesan create the zones, see P20.
 
 ### H7. All paths down: no_path_retry
 
@@ -656,6 +712,14 @@ Each `pvesan` command calls the API method in the same row, so `pvesan help <com
 | `pvesan array iscsi-login <id>` | `POST arrays/{id}/iscsi-login` | cluster task | `--portals` |
 | `pvesan array link <id> <storage>` | `POST arrays/{id}/link` | cluster | |
 | `pvesan array zoning <id>` | `GET arrays/{id}/zoning` | cluster view | |
+| `pvesan array zone-plan <id>` | `GET arrays/{id}/zoning-plan` | cluster view | `--fabrics`, `--targets` |
+| `pvesan array zone <id>` | `POST arrays/{id}/zone` | cluster task | `--fabrics`, `--targets` |
+| `pvesan fabric list` | `GET fabrics` | cluster | |
+| `pvesan fabric probe <address>` | `POST fabric-probe` | — | `--port` |
+| `pvesan fabric add <id>` | `POST fabrics` | cluster | `--type brocade|cisco`, `--address`, `--username`, `--fingerprint`, `--vsan`, `--vf-id`, `--zoneset` |
+| `pvesan fabric set <id>` | `PUT fabrics/{id}` | cluster | as add, `--delete` |
+| `pvesan fabric remove <id>` | `DELETE fabrics/{id}` | cluster | |
+| `pvesan fabric status <id>` | `GET fabrics/{id}/status` | cluster view | |
 | `pvesan array hosts <id>` | `GET arrays/{id}/hosts` | cluster view | |
 | `pvesan array remove-host <id> <host>` | `POST arrays/{id}/remove-host` | cluster task | |
 | `pvesan provision <array> <storage>` | `POST arrays/{id}/provision` | cluster task | `--pool`, `--size`, `--thin`, `--volume`, `--label`, `--content`, `--policy` |

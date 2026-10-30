@@ -3,6 +3,20 @@
 The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
+## Unreleased
+- Automatic FC zoning on Brocade (FOS REST API, 8.2.1+) and Cisco MDS
+  (NX-API) fabrics. New `pvesan fabric add/set/remove/list/status` registers
+  one switch per fabric (or VSAN / virtual fabric) with a pinned certificate;
+  `status` lists every logged-in port and which node or array it belongs to.
+  `pvesan array zone-plan` shows, per fabric, the single-initiator zones that
+  pair each node port with the array ports on that fabric, and
+  `pvesan array zone` creates or extends them, adds them to the zone set and
+  activates it. Fabrics with an open zoning change, or saved but inactive
+  changes, are refused; a failed change is aborted on the switch. In the GUI,
+  adding an array offers to zone it; Arrays > Auto-zone and a new Fabrics tab.
+- IBM Spectrum Virtualize and InfiniBox report their FC target ports, so the
+  zoning hints and automatic zoning know them.
+
 ## 1.6.1
 - IBM Spectrum Virtualize: snapshot copies and restores now copy in the
   background at FlashCopy copy rate 100 (64 MiB/s) instead of 50 (2 MiB/s,

@@ -11,7 +11,7 @@ With an array driver it goes one step further, like the Pure Storage or
 INFINIDAT vSphere plugins: **one form creates the volume on the array, maps it
 to the cluster, rescans every node and builds the datastore.**
 
-> **Status: beta.** Everything below is implemented and covered by 1250
+> **Status: beta.** Everything below is implemented and covered by 1319
 > automated tests, and the plugin runs on a 6-node Proxmox VE 9.2 lab with
 > QLogic and Emulex HBAs. **No array driver has yet been exercised against a
 > real array.** Try each new array type with a small test datastore first, and
@@ -27,6 +27,7 @@ to the cluster, rescans every node and builds the datastore.**
 | Devices | LUNs with paths, usage, cluster-wide alias and path policy (ALUA, round robin, MRU, fixed), detach/attach |
 | Datastores | Create on one or more LUNs, grow into an expanded LUN or add an extent, rename (label or storage ID), unmount/mount per node, reclaim free space (UNMAP), delete and detach |
 | Arrays | Add an array with a pinned TLS certificate, register the cluster's hosts by FC WWPN or iSCSI initiator name (and log every node in to the array's iSCSI portals), **provision a datastore end to end**, grow on the array, delete including the array volume |
+| Zoning | Add Brocade (FOS REST) and Cisco MDS (NX-API) switches; see every logged-in port with the node or array it belongs to; **zone an array to the cluster automatically** (single-initiator zones per fabric, plan first, then create and activate) |
 | Array snapshots | Snapshot a datastore on the array (on a schedule with retention, too), mount a snapshot as a read-only copy datastore, **restore one VM** from it over its disks or into a new VM, roll a whole datastore back (Pure, InfiniBox, PowerStore, NetApp ONTAP, IBM Spectrum Virtualize, HPE Primera / 3PAR, HPE Alletra 5000/6000) |
 | Space | Weekly automatic UNMAP reclaim per datastore; optional discard when a VM disk is deleted |
 | Per-disk volumes (**experimental**) | Storage type `fcsanvol`: every VM disk is its own array volume; snapshots, rollback, templates, linked clones and resize are array operations (Pure) |
