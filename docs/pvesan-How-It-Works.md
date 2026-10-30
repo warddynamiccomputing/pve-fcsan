@@ -308,7 +308,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 
 **Layers.** `Util`, `Sysfs`, `Multipath` (parsing/rendering) and `LVM` (parsing) are pure Perl and read sysfs through `PVESAN_SYSFS_ROOT`, so a fixture tree replaces `/sys`. `Inventory`, `Ops`, `Config` and `Cluster` add Proxmox VE and command execution; `Datastore` and `Provision` compose them; `API2::SAN` exposes them; the CLI and GUI sit only on the API.
 
-**Tests** (`make test`, 943 checks):
+**Tests** (`make test`, 969 checks):
 
 | File | Covers |
 | --- | --- |
@@ -324,6 +324,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 | `t/71-dr.t` | DR metadata slots (checksum, generations, torn slots), recovery plans, VM ID offsets and disk renames, guest configs for test and failover (VMs and containers), the metadata timer job, Pure's replication primitives against a fake array, and the replicate, planned-failover, test-failover, cleanup, failover and manual-import workflows against a fake driver |
 | `t/73-hpe3par.t` | HPE Primera / Alletra 9000 / 3PAR against a stateful fake WSAPI: session key, re-login and logout, error format, CPG capacity, host set registration with persona and ports, host set VLUNs, the full volume lifecycle, virtual copies and volume set snapshots (the array's own copies hidden), online copies, promote with its task, and volume set clean-up |
 | `t/72-snapshots-more.t` | Snapshots on NetApp ONTAP (FlexVol snapshots, FlexClone copies, restore, its own snapshots hidden, layout and serial checks) and IBM Spectrum Virtualize (FlashCopy targets, consistency groups, background copies, restore, clean-up after a failure) against stateful fake arrays |
+| `t/74-hardening.t` | `fc-discard` handing off to the LVM plugin's background discard (and the inline fallback), container configs and restore from a snapshot copy |
 | `t/80-integrate.t` | `pvesan-integrate` against a fake pve-manager tree: insertion point, upgrade from an older line, refusal without the anchor, exact removal, and that the patched `Nodes.pm` still loads with a broken pve-fcsan |
 | `t/90-compile.t` | Loads every module; fails on compile warnings. Uses the real Proxmox VE libraries when present, stubs otherwise |
 
@@ -364,7 +365,6 @@ The build also checks that every Proxmox function the code calls exists in the i
 | Code in pve-storage or qemu-server that tests `type eq 'lvm'` | An `fcsan` storage could miss an LVM-specific branch | Snapshot, clone and migrate a VM on `fcsan`; fall back by changing the type to `lvm` |
 | `Nodes.pm` anchor text changes | The integration can't find its insertion point | `pvesan-integrate apply` reports it and changes nothing |
 | Widget-toolkit API drift | GUI classes could change in a new Proxmox VE | Open the panel after upgrades; check the browser console |
-| Duplicate PVs while a copy is imported | Between mapping a clone and `vgimportclone`, LVM on other nodes sees two PVs with the same UUID and may refuse metadata changes on the source VG for those seconds | Mount copies outside busy periods; the task log shows the import step |
 | DR replicas never brought up on real arrays | Pure's replication calls are checked against Pure's SDK docs only; target-side naming follows Pure's Ansible module | Run a test failover with a test datastore before relying on it |
 
 **Functional limits compared with vCenter**

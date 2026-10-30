@@ -1314,6 +1314,51 @@ Ext.define('PVE.san.ArrayStatus', {
     },
 });
 
+// Storage type fcsanvol: one array volume per VM disk (experimental)
+Ext.define('PVE.san.VolStorageAdd', {
+    extend: 'Proxmox.window.Edit',
+
+    subject: gettext('Per-disk array storage (fcsanvol)'),
+    isCreate: true,
+    method: 'POST',
+    url: '/storage',
+    width: 520,
+
+    initComponent: function() {
+	let me = this;
+	let pools = Ext.create('Ext.data.Store', { fields: ['name', 'free'] });
+	Proxmox.Utils.API2Request({
+	    url: `/nodes/${me.nodename}/san/arrays/${me.arrayId}/pools`,
+	    method: 'GET',
+	    success: response => pools.loadData(response.result.data),
+	    failure: response => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
+	});
+	me.items = [{
+	    xtype: 'inputpanel',
+	    onGetValues: function(values) {
+		values.type = 'fcsanvol';
+		values['fc-array'] = me.arrayId;
+		values.content = 'images';
+		return PVE.san.Utils.joinValues(values);
+	    },
+	    items: [
+		{ xtype: 'displayfield', fieldLabel: gettext('Array'), value: Ext.htmlEncode(me.arrayId) },
+		{ xtype: 'textfield', name: 'storage', fieldLabel: 'ID', vtype: 'StorageId', allowBlank: false },
+		{ xtype: 'combobox', name: 'fc-pool', fieldLabel: gettext('Pool'), store: pools, queryMode: 'local',
+		    valueField: 'name', displayField: 'name', editable: false, allowBlank: false },
+		{ xtype: 'proxmoxintegerfield', name: 'fc-max-luns', fieldLabel: gettext('Max. disks'), minValue: 1,
+		    maxValue: 16383, emptyText: '255' },
+		{ xtype: 'proxmoxcheckbox', name: 'fc-keep-luns', fieldLabel: gettext('Keep LUNs on nodes'), uncheckedValue: 0 },
+		{ xtype: 'pveNodeSelector', name: 'nodes', fieldLabel: gettext('Nodes'), multiSelect: true,
+		    autoSelect: false, emptyText: gettext('All') + ' (' + gettext('No restrictions') + ')' },
+		{ xtype: 'displayfield', userCls: 'pmx-hint',
+		    value: gettext('Experimental. Every VM disk on this storage becomes its own volume on the array; snapshots, clones, templates and resize are array operations. Raw disks only. Each disk is a LUN mapped to every node, so mind the array\'s and HBAs\' LUN limits.') },
+	    ],
+	}];
+	me.callParent();
+    },
+});
+
 Ext.define('PVE.san.Provision', {
     extend: 'Proxmox.window.Edit',
 
@@ -1496,6 +1541,12 @@ Ext.define('PVE.san.ArrayGrid', {
 	    {
 		xtype: 'proxmoxButton', text: gettext('Provision datastore'), iconCls: 'fa fa-magic', selModel: sm, disabled: true,
 		handler: () => Ext.create('PVE.san.Provision', {
+		    nodename: me.nodename, arrayId: rec().array, autoShow: true, listeners: after,
+		}),
+	    },
+	    {
+		xtype: 'proxmoxButton', text: gettext('Per-disk storage'), selModel: sm, disabled: true,
+		handler: () => Ext.create('PVE.san.VolStorageAdd', {
 		    nodename: me.nodename, arrayId: rec().array, autoShow: true, listeners: after,
 		}),
 	    },
