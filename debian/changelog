@@ -1,3 +1,23 @@
+pve-fcsan (1.6.0) trixie; urgency=medium
+
+  * New array drivers: HPE Primera / Alletra 9000 / 3PAR (hpe-3par),
+    HPE Alletra 5000/6000 and Nimble (hpe-nimble) and Dell Unity XT
+    (dell-unity), each with array snapshots, copies and restore.
+  * iSCSI provisioning: array setting protocol (fc, iscsi, both); nodes'
+    initiator names registered on the array, nodes logged in to the
+    array's target portals, portals restored at boot.
+  * Array snapshots on NetApp ONTAP and IBM Spectrum Virtualize; Dell
+    PowerStore datastores on several volumes snapshotted through volume
+    groups.
+  * Hardening: fc-discard uses the LVM plugin's background discard,
+    fcsanvol disks release their LUN when the VM leaves a node, container
+    restore from snapshot copies, no duplicate PVs on other nodes during
+    snapshot mounts and DR imports.
+  * Experimental: replication and disaster recovery (Pure FlashArray):
+    recovery plans, test failover, failover and planned failover.
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Fri, 30 Oct 2026 12:00:00 +0000
+
 pve-fcsan (1.5.0) trixie; urgency=medium
 
   * Array snapshots of datastores (Pure FlashArray, InfiniBox, PowerStore):
