@@ -1,3 +1,11 @@
+pve-fcsan (1.6.1) trixie; urgency=medium
+
+  * IBM Spectrum Virtualize: snapshot copies and restores copy in the
+    background at FlashCopy copy rate 100 (64 MiB/s) instead of 50
+    (2 MiB/s); new array setting copy-rate (1-150) changes it.
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Fri, 30 Oct 2026 20:00:00 +0000
+
 pve-fcsan (1.6.0) trixie; urgency=medium
 
   * New array drivers: HPE Primera / Alletra 9000 / 3PAR (hpe-3par),

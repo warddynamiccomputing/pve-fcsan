@@ -3,7 +3,7 @@
 The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
-## Unreleased
+## 1.6.1
 - IBM Spectrum Virtualize: snapshot copies and restores now copy in the
   background at FlashCopy copy rate 100 (64 MiB/s) instead of 50 (2 MiB/s,
   about 6 days for 1 TiB), and the new array setting `copy-rate` (1 to 150)
