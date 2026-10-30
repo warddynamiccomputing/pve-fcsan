@@ -3,7 +3,7 @@
 The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
-## Unreleased
+## 1.7.0
 - Automatic FC zoning on Brocade (FOS REST API, 8.2.1+) and Cisco MDS
   (NX-API) fabrics. New `pvesan fabric add/set/remove/list/status` registers
   one switch per fabric (or VSAN / virtual fabric) with a pinned certificate;
