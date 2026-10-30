@@ -10,11 +10,14 @@ package PVE::SAN::Array::ESeries;
 #               POST volumes/<id>/expand {sizeUnit, expansionSize = new total}
 #               DELETE volumes/<id>
 #   host        POST hosts {name, hostType: {index}, ports: [{type, port, label}]}
+#               (type fc or iscsi; port = WWPN or IQN)
 #               POST hosts/<id> {ports: [...]}           (add ports)
 #               POST hosts/<id>/move {group: <clusterRef>} (join a group)
 #   host group  POST host-groups {name, hosts: []}; id = clusterRef
 #   mapping     POST volume-mappings {mappableObjectId, targetId}
 #               DELETE volume-mappings/<lunMappingRef>
+#   iSCSI       GET graph (ioInterface, na_santricity_facts) for portals,
+#               GET graph/xpath-filter?query=/storagePoolBundle/target for the IQN
 #
 # Thick volumes only: E-Series thin volumes need DDP repository sizing,
 # which is out of scope.
@@ -95,12 +98,16 @@ sub hosts {
     return [ map {
         my $h = $_;
         my $ref = $h->{clusterRef} // $NO_GROUP;
+        my @ports = @{$h->{hostSidePorts} // []};
         {
             id => $h->{id} // $h->{hostRef},
             name => $h->{name} // $h->{label},
             hostcluster => $ref ne $NO_GROUP ? $group{$ref} : undef,
             wwpns => [ sort grep { defined } map { PVE::SAN::Array::Base::norm_wwpn($_->{address}) }
-                grep { lc($_->{type} // '') eq 'fc' } @{$h->{hostSidePorts} // []} ],
+                grep { lc($_->{type} // '') eq 'fc' } @ports ],
+            iqns => [ sort grep { defined } map { PVE::SAN::Array::Base::norm_iqn($_->{address}) }
+                grep { lc($_->{type} // '') eq 'iscsi' } @ports ],
+            ports => scalar(@ports),
         }
     } @{$self->call('GET', '/hosts') // []} ];
 }
@@ -115,10 +122,14 @@ sub linux_host_type {
     return $self->{host_type} = $t ? $t->{index} : 28; # 28 = Linux DM-MP on current firmware
 }
 
+# na_santricity_host: ports [{type: fc | iscsi, port: WWPN or IQN, label}]
 sub port_entries {
-    my ($name, $wwpns, $start) = @_;
+    my ($name, $wwpns, $start, $iqns) = @_;
     my $i = $start // 0;
-    return [ map { { type => 'fc', port => lc($_), label => substr("$name-p" . $i++, 0, 30) } } @$wwpns ];
+    return [
+        (map { { type => 'fc', port => lc($_), label => substr("$name-p" . $i++, 0, 30) } } @$wwpns),
+        (map { { type => 'iscsi', port => $_, label => substr("$name-p" . $i++, 0, 30) } } @{$iqns // []}),
+    ];
 }
 
 sub create_hostcluster {
@@ -127,16 +138,42 @@ sub create_hostcluster {
 }
 
 sub create_host {
-    my ($self, $name, $wwpns) = @_;
+    my ($self, $name, $wwpns, $iqns) = @_;
     my $h = $self->call('POST', '/hosts', undef,
-        { name => $name, hostType => { index => $self->linux_host_type }, ports => port_entries($name, $wwpns) }) // {};
-    return { id => $h->{id} // $h->{hostRef}, name => $name, hostcluster => undef, wwpns => [@$wwpns] };
+        { name => $name, hostType => { index => $self->linux_host_type }, ports => port_entries($name, $wwpns, 0, $iqns) }) // {};
+    return { id => $h->{id} // $h->{hostRef}, name => $name, hostcluster => undef, wwpns => [@$wwpns], iqns => [@{$iqns // []}] };
 }
 
 sub add_host_ports {
-    my ($self, $host, $wwpns) = @_;
-    $self->call('POST', "/hosts/$host->{id}", undef,
-        { ports => port_entries($host->{name}, $wwpns, scalar(@{$host->{wwpns} // []})) });
+    my ($self, $host, $wwpns, $iqns) = @_;
+    my $have = $host->{ports} // (@{$host->{wwpns} // []} + @{$host->{iqns} // []});
+    $self->call('POST', "/hosts/$host->{id}", undef, { ports => port_entries($host->{name}, $wwpns, $have, $iqns) });
+}
+
+sub supports_iscsi { return 1; }
+
+# From the storage array graph, as na_santricity_facts reads it: hostside
+# ioInterface entries of type iscsi (ethernet) with an enabled IPv4
+# address; the target name from graph/xpath-filter?query=/storagePoolBundle/target
+# (na_santricity_iscsi_target).
+sub target_portals {
+    my ($self) = @_;
+    my ($iqn) = map { PVE::SAN::Array::Base::norm_iqn($_->{nodeName}->{iscsiNodeName}) }
+        grep { ref($_->{nodeName}) eq 'HASH' && ($_->{nodeName}->{ioInterfaceType} // '') eq 'iscsi' }
+        @{$self->call('GET', '/graph/xpath-filter', { query => '/storagePoolBundle/target' }) // []};
+    my $graph = $self->call('GET', '/graph') // {};
+    my @res;
+    for my $io (@{$graph->{ioInterface} // []}) {
+        next if ($io->{channelType} // '') ne 'hostside';
+        my $d = $io->{ioInterfaceTypeData} // {};
+        next if ($d->{interfaceType} // '') ne 'iscsi';
+        my $is = $d->{iscsi} // {};
+        next if !$is->{ipv4Enabled} || ((($is->{interfaceData} // {})->{type}) // 'ethernet') ne 'ethernet';
+        my $addr = ((($is->{ipv4Data} // {})->{ipv4AddressData}) // {})->{ipv4Address};
+        next if !$addr || $addr eq '0.0.0.0';
+        push @res, { address => $addr, port => 3260, iqn => $iqn };
+    }
+    return \@res;
 }
 
 sub group_ref {

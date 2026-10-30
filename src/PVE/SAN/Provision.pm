@@ -13,10 +13,12 @@ use PVE::Storage;
 use PVE::Tools;
 
 use PVE::SAN::Array;
+use PVE::SAN::Array::Base;
 use PVE::SAN::Cluster;
 use PVE::SAN::Config;
 use PVE::SAN::Datastore;
 use PVE::SAN::Inventory;
+use PVE::SAN::ISCSI;
 
 my $GIB = 1024 * 1024 * 1024;
 
@@ -31,6 +33,7 @@ sub array_add {
     my $class = PVE::SAN::Array::driver_class($p{type});
     my %opts = map { $PVE::SAN::Array::OPTION_KEYS->{$_} => $p{$_} }
         grep { defined($p{$_}) } keys %$PVE::SAN::Array::OPTION_KEYS;
+    $class->check_protocol($p{protocol}) if defined($p{protocol});
     my $drv = $class->new((map { $_ => $p{$_} } qw(address port username password fingerprint)), %opts);
     my $info = $drv->system_info(); # proves address, certificate and credentials
     die "host cluster name '$p{hostcluster}' is not valid on this array\n"
@@ -69,6 +72,7 @@ sub array_update {
         delete $new{$d} if $d =~ /^(?:hostcluster|description)$/;
         delete $new{$PVE::SAN::Array::OPTION_KEYS->{$d}} if $PVE::SAN::Array::OPTION_KEYS->{$d};
     }
+    PVE::SAN::Array::driver_class($new{type})->check_protocol($p{protocol}) if defined($p{protocol});
     my $password = $p{password} // PVE::SAN::Array::read_password($id);
 
     # re-test whenever connection settings change
@@ -94,6 +98,10 @@ sub array_remove {
         my @linked = grep { ($cfg->{datastores}->{$_}->{array} // '') eq $id } keys %{$cfg->{datastores}};
         die "array '$id' still backs datastore(s): @linked\n" if @linked;
         delete $cfg->{arrays}->{$id};
+        # nodes stay logged in until rebooted or logged out; they just stop
+        # logging in to this array's portals at boot
+        my $portals = ($cfg->{iscsi} // {})->{portals} // {};
+        delete $portals->{$_} for grep { ($portals->{$_}->{array} // '') eq $id } keys %$portals;
     });
     PVE::SAN::Array::delete_password($id);
 }
@@ -110,20 +118,22 @@ sub array_status {
     my $info = $drv->system_info();
     my $hosts = $drv->hosts();
     my %owner;
-    for my $h (@$hosts) { $owner{$_} = $h for @{$h->{wwpns}}; }
+    for my $h (@$hosts) { $owner{$_} = $h for @{$h->{wwpns} // []}, @{$h->{iqns} // []}; }
     my $hc_exists = grep { $_->{name} eq $hc } @{$drv->host_clusters()};
 
     my @nodes;
-    my $wwpns = PVE::SAN::Array::node_wwpns();
-    for my $node (sort keys %$wwpns) {
-        my @w = @{$wwpns->{$node}};
+    my $ports = PVE::SAN::Array::node_ports(PVE::SAN::Array::protocol($cfg));
+    for my $node (sort keys %$ports) {
+        my ($ww, $wi) = PVE::SAN::Array::Base::split_ports($ports->{$node});
+        my @w = (@$ww, @$wi);
         my %hn = map { $_->{name} => $_ } grep { defined } map { $owner{$_} } @w;
         my @missing = grep { !$owner{$_} } @w;
         my ($host) = values %hn;
         my $ok = (keys %hn == 1 && !@missing && ($host->{hostcluster} // '') eq $hc) ? 1 : 0;
         push @nodes, {
             node => $node,
-            wwpns => join(',', @w),
+            wwpns => join(',', @$ww),
+            iqns => join(',', @$wi),
             host => join(',', sort keys %hn),
             hostcluster => $host ? $host->{hostcluster} : undef,
             missing => join(',', @missing),
@@ -136,6 +146,7 @@ sub array_status {
         system => $info->{name},
         product => $info->{product},
         code_level => $info->{code_level},
+        protocol => PVE::SAN::Array::protocol($cfg),
         hostcluster => $hc,
         hostcluster_exists => $hc_exists ? 1 : 0,
         nodes => \@nodes,
@@ -146,14 +157,16 @@ sub register_cluster {
     my (%p) = @_;
 
     my $id = $p{array};
-    my $hc = PVE::SAN::Array::hostcluster(PVE::SAN::Array::config($id));
+    my $cfg = PVE::SAN::Array::config($id);
+    my $hc = PVE::SAN::Array::hostcluster($cfg);
+    my $protocol = PVE::SAN::Array::protocol($cfg);
     my $drv = PVE::SAN::Array::driver($id);
 
     my $off = PVE::SAN::Cluster::offline_nodes();
     print "WARNING: offline node(s) not registered: @$off - run this again when they are back\n" if @$off;
 
-    my $wwpns = PVE::SAN::Array::node_wwpns();
-    my $res = $drv->ensure_hostcluster($hc, $wwpns);
+    my $ports = PVE::SAN::Array::node_ports($protocol);
+    my $res = $drv->ensure_hostcluster($hc, $ports);
     for my $node (sort keys %$res) {
         my $r = $res->{$node};
         my @what = (
@@ -164,7 +177,51 @@ sub register_cluster {
         print "[$node] array host '$r->{host}': " . join(', ', @what) . "\n";
     }
     print "cluster registered on array '$id' as host cluster '$hc'\n";
+
+    iscsi_login(array => $id, driver => $drv, nodes => [ sort keys %$ports ], quiet => 1) if $protocol ne 'fc';
     return $hc;
+}
+
+# Log the nodes in to the array's iSCSI portals: the ones given, else the
+# ones the array reports, else the ones recorded for this array earlier.
+sub iscsi_login {
+    my (%p) = @_;
+
+    my $id = $p{array};
+    my $nodes = $p{nodes} // PVE::SAN::Cluster::nodes();
+    my @portals;
+    if (defined($p{portals}) && length($p{portals})) {
+        @portals = map { { portal => PVE::SAN::ISCSI::norm_portal($_) } } grep { length } split(/[,; ]+/, $p{portals});
+    } else {
+        my $drv = $p{driver} // PVE::SAN::Array::driver($id);
+        my $tp = $drv->supports_iscsi ? $drv->target_portals() : undef;
+        @portals = map { { portal => PVE::SAN::ISCSI::norm_portal("$_->{address}:" . ($_->{port} // 3260)), target => $_->{iqn} } }
+            grep { $_->{address} } @{$tp // []};
+        if (!@portals) {
+            my $rec = PVE::SAN::ISCSI::recorded_portals();
+            @portals = map { { portal => $_, target => $rec->{$_}->{target} } }
+                grep { ($rec->{$_}->{array} // '') eq $id } sort keys %$rec;
+        }
+    }
+    if (!@portals) {
+        my $msg = "array '$id' reports no iSCSI target portals - log the nodes in with"
+            . " 'pvesan array iscsi-login $id --portals <address>[,<address>...]'\n";
+        die $msg if !$p{quiet};
+        print "WARNING: $msg";
+        return [];
+    }
+
+    my %seen;
+    @portals = grep { !$seen{"$_->{portal} " . ($_->{target} // '')}++ } @portals;
+    for my $pt (@portals) {
+        PVE::SAN::Cluster::on_nodes($nodes, "logging in to iSCSI portal $pt->{portal}", 'POST', 'iscsi-login', {
+            portal => $pt->{portal},
+            array => $id,
+            (defined($pt->{target}) ? (target => $pt->{target}) : ()),
+        });
+    }
+    print "nodes logged in to " . scalar(@portals) . " iSCSI portal(s) of array '$id'\n";
+    return [ map { $_->{portal} } @portals ];
 }
 
 # --- datastore lifecycle on the array ---

@@ -146,16 +146,31 @@ Array drivers turn pvesan from a SAN manager into a provisioning tool. The array
 
 | Module | Role |
 | --- | --- |
-| `PVE::SAN::Array` | Registry of array types to drivers; array settings in the cluster DB, secrets in `/etc/pve/priv/pvesan/`; certificate probe; collects every node's WWPNs |
+| `PVE::SAN::Array` | Registry of array types to drivers; array settings in the cluster DB, secrets in `/etc/pve/priv/pvesan/`; certificate probe; collects every node's WWPNs and/or iSCSI initiator name (array setting `protocol`) |
 | `PVE::SAN::Array::Base` | Shared driver code: TLS-pinned HTTP client, naming rules, vendor-neutral host and host-cluster registration |
 | `PVE::SAN::Array::<Vendor>` | One module per platform |
 | `PVE::SAN::Provision` | Workflows: register the cluster, provision, grow, destroy with the volume, link |
+| `PVE::SAN::ISCSI` | Node-local open-iscsi steps: initiator name, sessions, discovery and login, portals recorded for boot |
 
 **Driver contract.** A driver implements `system_info`, `pools`, `hosts`, `host_clusters`, `create_hostcluster`, `create_host`, `add_host_ports`, `add_to_hostcluster`, `create_volume`, `volume`, `find_volume_by_wwid`, `map_to_hostcluster`, `unmap_from_hostcluster`, `expand_volume` and `delete_volume`. A volume always comes back with its multipath WWID, which connects array objects to everything else in pvesan. Drivers whose arrays present volumes differently override `ensure_hostcluster`. Three hooks cover vendor differences: `options` (required settings such as `svm` or `portgroup`), `valid_hostcluster_name`, and `wwid_after_map`.
 
 **Trust.** No connection is made without a pinned SHA-256 certificate fingerprint. `array-probe` reads it, the admin compares it with the array's own display, and from then on only that certificate is accepted. Hostname checks are off because the pin is stronger than CA trust for the usual self-signed array certificate. Credentials are tested before anything is saved.
 
 **Registration** (`ensure_hostcluster`) is idempotent. For each node, an array host that already owns any of its WWPNs is reused and missing ports are added; otherwise a host named after the node is created (with "force", because ports may not be logged in until zoning is done). Every host then joins the cluster's host cluster. Ports split across hosts, or a host already in another host cluster, are refused: fixing those is an admin decision on the array.
+
+**iSCSI.** A node's ports are FC WWPNs (16 hex digits) or iSCSI names (`iqn.`/`eui.`, lower case). The array setting `protocol` (`fc` by default, `iscsi`, `both`) decides which ones `PVE::SAN::Array::node_ports` collects: WWPNs from each node's `adapters`, the initiator name from each node's `GET iscsi` (`/etc/iscsi/initiatorname.iscsi`; the sysfs `iscsi_host` only exists once a session does). Hosts carry `wwpns` and `iqns`, and `create_host` / `add_host_ports` take both lists. A driver opts in with `supports_iscsi` and an optional `target_portals` primitive (`[ { address, port, iqn } ]`); `ensure_hostcluster` refuses IQNs for any other driver ("iSCSI host registration is not supported yet") before it changes anything on the array, and `array add`/`set` refuses the setting. After an iSCSI registration, `Provision::iscsi_login` calls the node step `POST iscsi-login` on every node for each portal (the array's, given ones, or the ones recorded for the array). The node step runs `iscsiadm -m discovery -t sendtargets`, sets `node.startup=automatic` on every record and logs in only where `iscsiadm -m session` shows no session, so it is idempotent; it fails only if no session to that portal exists afterwards. It records the portal in `iscsi.portals` of the cluster config, and `pvesan-sync.service` runs `pvesan iscsi restore` at boot (before `pvesan sync`, so the new paths get multipath maps), which logs in to recorded portals without a session, including on nodes that joined later. A rescan then finds iSCSI LUNs exactly like FC ones (`scan` on the `iscsi_host`).
+
+| Platform | iSCSI host registration | Target portals | Checked against |
+| --- | --- | --- | --- |
+| Pure FlashArray | HostPost `iqns`, HostPatch `add_iqns` | `GET ports`: `portal`, `iqn` | go-pure-client FA 2.50 docs |
+| IBM Spectrum Virtualize | `mkhost -iscsiname`, `addhostport -iscsiname`; `lshost` `iscsi_name` | `lsnode` `iscsi_name`; `lsip` (portset0) or `lsportip` (host=yes) | Cinder `storwize_svc_common.py` |
+| Dell PowerStore | initiators `{port_name, port_type: iSCSI}` | `ip_pool_address` with purpose `Storage_Iscsi_Target`, `ip_port(target_iqn)` | Cinder PowerStore client, PyPowerStore |
+| INFINIDAT InfiniBox | host port `{type: iscsi, address}` | `network/spaces` with service `ISCSI_SERVICE`: enabled `ips`, `properties.iscsi_iqn`, `iscsi_tcp_port` | InfiniSDK, Cinder `infinidat.py` |
+| NetApp ONTAP | igroup protocol `iscsi` (`mixed` for both; fixed at creation) | `network/ip/interfaces` with service `data_iscsi`; `protocols/san/iscsi/services` `target.name` | `na_ontap_igroup`, Cinder ONTAP REST client |
+| NetApp E-Series | host port `{type: iscsi, port: IQN}` | `graph` hostside `ioInterface` of type iscsi; `graph/xpath-filter` `/storagePoolBundle/target` | SANtricity Ansible (`_host`, `_facts`, `_iscsi_target`) |
+| Hitachi VSP | `host-iscsis {iscsiName, portId, hostGroupNumber}` in the host group on each iSCSI target port (`portType ISCSI`) | `ports/<id>` `ipv4Address`, `tcpPort`; host group `iscsiName` | Cinder `hbsd_rest_api.py`, `hbsd_rest_iscsi.py` |
+| Dell PowerMax | `initiatorId` with IQNs | port group `symmetrixPortKey`, then `system/.../director/<d>/port/<p>` `ip_addresses`, `identifier` | PyU4V `provisioning.py`, `system.py` |
+| Fujitsu ETERNUS | not supported yet (the RESTful API reference could not be checked for it) | | |
 
 **Provision** runs inside one task: register the cluster; create the volume; map it; rescan every 30 s and poll every node every 10 s until each node has an active path (up to 120 s); record the path policy; run the normal datastore create; store the link `datastores.<id> = { array, volumes[] }`. If anything fails before the datastore exists, the task unmaps the volume, cleans dead paths on all nodes, deletes the volume and drops the device record.
 
@@ -166,7 +181,7 @@ Array drivers turn pvesan from a SAN manager into a provisioning tool. The array
 | INFINIDAT InfiniBox | `/api/rest/...`, Basic auth, `approved=true` on changes | InfiniSDK source | Cluster; LUN on the cluster, unmapped by LUN number | `36` + serial |
 | Dell PowerStore | `/api/rest/...`, `login_session` → `DELL-EMC-TOKEN` + cookie | PyPowerStore | Host group (created with its first host) | `wwn` |
 | Dell PowerMax / VMAX | Unisphere `/univmax/restapi/<ver>/sloprovisioning/symmetrix/<id>` | PyU4V | Host group + storage group `<hc>_SG` + masking view `<hc>_MV`; volumes created in the SG | `effective_wwn` |
-| NetApp ONTAP | `/api/...`, jobs awaited | `netapp.ontap` Ansible modules | One FCP igroup; one FlexVol + LUN per datastore | `3600a0980` + hex(serial) |
+| NetApp ONTAP | `/api/...`, jobs awaited | `netapp.ontap` Ansible modules | One igroup (FCP, iSCSI or mixed); one FlexVol + LUN per datastore | `3600a0980` + hex(serial) |
 | NetApp E-Series | `/devmgr/v2/storage-systems/<ssid>` | SANtricity Ansible collection | Host group (Linux DM-MP host type) | `wwn` |
 | Hitachi VSP | `/ConfigurationManager/v1/objects/storages/<id>`, session token, jobs awaited | OpenStack Cinder Hitachi driver, Configuration Manager reference | One host group per target port; LU path on each | `naaId` (known after mapping) |
 | Fujitsu ETERNUS DX S5 / AF S3 | `:5665/api/v1/...`, `POST session` → Bearer token, jobs awaited and deleted | ETERNUS RESTful API Reference (P3AG-5492) | One FC host per WWN (the API has no host groups); every volume connected to all of them with one host LUN | `3` + `uid` |
@@ -310,7 +325,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 
 **Layers.** `Util`, `Sysfs`, `Multipath` (parsing/rendering) and `LVM` (parsing) are pure Perl and read sysfs through `PVESAN_SYSFS_ROOT`, so a fixture tree replaces `/sys`. `Inventory`, `Ops`, `Config` and `Cluster` add Proxmox VE and command execution; `Datastore` and `Provision` compose them; `API2::SAN` exposes them; the CLI and GUI sit only on the API.
 
-**Tests** (`make test`, 1064 checks):
+**Tests** (`make test`, 1153 checks):
 
 | File | Covers |
 | --- | --- |
@@ -326,6 +341,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 | `t/71-dr.t` | DR metadata slots (checksum, generations, torn slots), recovery plans, VM ID offsets and disk renames, guest configs for test and failover (VMs and containers), the metadata timer job, Pure's replication primitives against a fake array, and the replicate, planned-failover, test-failover, cleanup, failover and manual-import workflows against a fake driver |
 | `t/73-hpe3par.t` | HPE Primera / Alletra 9000 / 3PAR against a stateful fake WSAPI: session key, re-login and logout, error format, CPG capacity, host set registration with persona and ports, host set VLUNs, the full volume lifecycle, virtual copies and volume set snapshots (the array's own copies hidden), online copies, promote with its task, and volume set clean-up |
 | `t/72-snapshots-more.t` | Snapshots on NetApp ONTAP (FlexVol snapshots, FlexClone copies, restore, its own snapshots hidden, layout and serial checks) and IBM Spectrum Virtualize (FlashCopy targets, consistency groups, background copies, restore, clean-up after a failure) against stateful fake arrays |
+| `t/75-iscsi.t` | iSCSI names, the node's initiator name, portal parsing, the exact `iscsiadm` discovery, `node.startup` and login commands (idempotent, partial failures), boot restore, node ports per protocol, refusal by drivers without iSCSI, and each driver's iSCSI host bodies and target portals against fake arrays |
 | `t/76-nimble.t` | HPE Alletra 5000/6000 (Nimble) against a stateful fake NimOS array: token login and re-login, `{data}` request bodies, paged lists, asynchronous jobs, the FC initiator group, WWID from the serial, the volume lifecycle (offline before delete), snapshots, volume and snapshot collections, clones, restore, error formats |
 | `t/74-hardening.t` | `fc-discard` handing off to the LVM plugin's background discard (and the inline fallback), container configs and restore from a snapshot copy |
 | `t/80-integrate.t` | `pvesan-integrate` against a fake pve-manager tree: insertion point, upgrade from an older line, refusal without the anchor, exact removal, and that the patched `Nodes.pm` still loads with a broken pve-fcsan |

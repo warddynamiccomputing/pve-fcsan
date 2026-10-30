@@ -69,7 +69,7 @@ Ext.define('PVE.san.Utils', {
 	    port: 8443,
 	    username: true,
 	    secretLabel: gettext('Password'),
-	    roleHint: gettext('Address = Unisphere for PowerMax. User needs the StorageAdmin role on the array. Create a port group of the array FC ports zoned to the cluster first; pvesan creates the host group, storage group <cluster>_SG and masking view <cluster>_MV.'),
+	    roleHint: gettext('Address = Unisphere for PowerMax. User needs the StorageAdmin role on the array. Create a port group of the array FC ports zoned to the cluster (or of its iSCSI ports) first; pvesan creates the host group, storage group <cluster>_SG and masking view <cluster>_MV.'),
 	    certHint: gettext('Unisphere: Settings > Certificate Management.'),
 	    fields: { 'system-id': true, 'portgroup': true, 'srp': false, 'slo': false },
 	},
@@ -78,7 +78,7 @@ Ext.define('PVE.san.Utils', {
 	    port: 443,
 	    username: true,
 	    secretLabel: gettext('Password'),
-	    roleHint: gettext('Use a cluster or SVM admin account with the REST API (http) application. Each datastore gets its own FlexVol with one LUN; pools are aggregates; the cluster is one FCP igroup.'),
+	    roleHint: gettext('Use a cluster or SVM admin account with the REST API (http) application. Each datastore gets its own FlexVol with one LUN; pools are aggregates; the cluster is one igroup (FCP, iSCSI or mixed, by protocol).'),
 	    certHint: gettext('ONTAP: "security certificate show" on the cluster management LIF.'),
 	    fields: { 'svm': true },
 	},
@@ -96,12 +96,13 @@ Ext.define('PVE.san.Utils', {
 	    port: 443,
 	    username: true,
 	    secretLabel: gettext('Password'),
-	    roleHint: gettext('Use a storage user with the Storage Administrator (Provisioning) role. Hitachi host groups belong to one port: list every array FC port zoned to the cluster; pvesan creates a host group and LU path on each.'),
+	    roleHint: gettext('Use a storage user with the Storage Administrator (Provisioning) role. Hitachi host groups belong to one port: list every array FC port zoned to the cluster (or iSCSI port); pvesan creates a host group and LU path on each.'),
 	    certHint: gettext('Configuration Manager / SVP: server certificate settings.'),
 	    fields: { 'target-ports': true, 'system-id': false },
 	},
 	'fujitsu-eternus': {
 	    name: 'Fujitsu ETERNUS DX S5 / AF S3 (RESTful API)',
+	    noIscsi: true,
 	    port: 5665,
 	    username: true,
 	    secretLabel: gettext('Password'),
@@ -1197,6 +1198,17 @@ Ext.define('PVE.san.ArrayEdit', {
 		{ xtype: 'textfield', name: 'hostcluster', fieldLabel: gettext('Host cluster'),
 		    value: me.isCreate ? '' : rec.hostcluster, allowBlank: true,
 		    emptyText: gettext('Proxmox cluster name') },
+		{
+		    xtype: 'proxmoxKVComboBox',
+		    name: 'protocol',
+		    fieldLabel: gettext('Protocol'),
+		    value: rec.protocol || 'fc',
+		    comboItems: [
+			['fc', gettext('Fibre Channel (node WWPNs)')],
+			['iscsi', gettext('iSCSI (node initiator names)')],
+			['both', gettext('FC and iSCSI')],
+		    ],
+		},
 		{ xtype: 'textfield', name: 'description', fieldLabel: gettext('Description'),
 		    value: rec.description || '', allowBlank: true },
 	    ],
@@ -1248,6 +1260,12 @@ Ext.define('PVE.san.ArrayEdit', {
 	if (setPort) {
 	    form.findField('port').setValue(t.port);
 	}
+	// drivers without verified iSCSI calls register FC ports only
+	let protocol = form.findField('protocol');
+	protocol.setDisabled(!!t.noIscsi);
+	if (t.noIscsi) {
+	    protocol.setValue('fc');
+	}
 	let fields = t.fields || {};
 	PVE.san.Utils.optionFields.forEach(function(f) {
 	    let field = form.findField(f.name);
@@ -1275,7 +1293,7 @@ Ext.define('PVE.san.ArrayStatus', {
 
     initComponent: function() {
 	let me = this;
-	let store = Ext.create('Ext.data.Store', { fields: ['node', 'registered', 'host', 'hostcluster', 'missing', 'wwpns'] });
+	let store = Ext.create('Ext.data.Store', { fields: ['node', 'registered', 'host', 'hostcluster', 'missing', 'wwpns', 'iqns'] });
 	let header = Ext.create('Ext.Component', { padding: 8, html: gettext('Loading...') });
 
 	let load = function() {
@@ -1285,7 +1303,9 @@ Ext.define('PVE.san.ArrayStatus', {
 		waitMsgTarget: me,
 		success: function(response) {
 		    let d = response.result.data;
-		    header.setHtml(Ext.htmlEncode(`${d.product || ''} ${d.system || ''}, code level ${d.code_level || '?'}`)
+		    me.protocol = d.protocol || 'fc';
+		    me.down('#iscsiLogin').setDisabled(me.protocol === 'fc');
+		    header.setHtml(Ext.htmlEncode(`${d.product || ''} ${d.system || ''}, code level ${d.code_level || '?'}, protocol ${me.protocol}`)
 			+ '<br>' + Ext.String.format(gettext("Host cluster '{0}': {1}"), Ext.htmlEncode(d.hostcluster),
 			    d.hostcluster_exists ? gettext('present') : gettext('missing')));
 		    store.loadData(d.nodes);
@@ -1313,6 +1333,16 @@ Ext.define('PVE.san.ArrayStatus', {
 		text: gettext('Register cluster on array'),
 		handler: () => PVE.san.Utils.runTask({
 		    url: `/nodes/${me.nodename}/san/arrays/${me.arrayId}/register-cluster`,
+		    done: load,
+		}),
+	    },
+	    {
+		text: gettext('iSCSI login'),
+		itemId: 'iscsiLogin',
+		disabled: true,
+		tooltip: gettext("Log every node in to the array's iSCSI target portals"),
+		handler: () => PVE.san.Utils.runTask({
+		    url: `/nodes/${me.nodename}/san/arrays/${me.arrayId}/iscsi-login`,
 		    done: load,
 		}),
 	    },
@@ -1525,6 +1555,7 @@ Ext.define('PVE.san.ArrayGrid', {
 			    { header: gettext('Host'), dataIndex: 'host', width: 160 },
 			    { header: gettext('Host cluster'), dataIndex: 'hostcluster', width: 130 },
 			    { header: 'WWPNs', dataIndex: 'wwpns', flex: 1 },
+			    { header: 'IQNs', dataIndex: 'iqns', flex: 1 },
 			    { header: gettext('Removed node'), dataIndex: 'stale', width: 110, renderer: Proxmox.Utils.format_boolean },
 			],
 			tbar: [{

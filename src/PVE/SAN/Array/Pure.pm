@@ -10,6 +10,7 @@ package PVE::SAN::Array::Pure;
 # generated SDK docs (go-pure-client, flasharray/FA_2_50/docs: VolumesAPI,
 # HostsAPI, HostGroupsAPI, ConnectionsAPI, AuthorizationAPI, VolumePost,
 # VolumePatch, HostPost, Host, ArraySpace, Space);
+# iSCSI: HostPost iqns, HostPatch add_iqns, Host iqns, Port iqn + portal;
 # snapshots: VolumeSnapshotsAPI, VolumeSnapshotPost, VolumeSnapshot,
 # ProtectionGroupsAPI, ProtectionGroupSnapshotsAPI, ProtectionGroupSnapshotPost,
 # VolumesAPI (copy with source + overwrite).
@@ -160,6 +161,7 @@ sub hosts {
             name => $_->{name},
             hostcluster => (defined($hg) && length($hg)) ? $hg : undef,
             wwpns => [ sort grep { defined } map { PVE::SAN::Array::Base::norm_wwpn($_) } @{$_->{wwns} // []} ],
+            iqns => [ sort grep { defined } map { PVE::SAN::Array::Base::norm_iqn($_) } @{$_->{iqns} // []} ],
         }
     } @{$self->items('/hosts')} ];
 }
@@ -176,15 +178,19 @@ sub create_hostcluster {
     $self->call('POST', '/host-groups', { names => $name }, {});
 }
 
+# HostPost {wwns, iqns}; HostPatch {add_wwns, add_iqns}
 sub create_host {
-    my ($self, $name, $wwpns) = @_;
-    $self->call('POST', '/hosts', { names => $name }, { wwns => [@$wwpns] });
-    return { id => $name, name => $name, hostcluster => undef, wwpns => [@$wwpns] };
+    my ($self, $name, $wwpns, $iqns) = @_;
+    $iqns //= [];
+    $self->call('POST', '/hosts', { names => $name }, { (@$wwpns ? (wwns => [@$wwpns]) : ()), (@$iqns ? (iqns => [@$iqns]) : ()) });
+    return { id => $name, name => $name, hostcluster => undef, wwpns => [@$wwpns], iqns => [@$iqns] };
 }
 
 sub add_host_ports {
-    my ($self, $host, $wwpns) = @_;
-    $self->call('PATCH', '/hosts', { names => $host->{name} }, { add_wwns => [@$wwpns] });
+    my ($self, $host, $wwpns, $iqns) = @_;
+    $iqns //= [];
+    $self->call('PATCH', '/hosts', { names => $host->{name} },
+        { (@$wwpns ? (add_wwns => [@$wwpns]) : ()), (@$iqns ? (add_iqns => [@$iqns]) : ()) });
 }
 
 sub add_to_hostcluster {
@@ -222,6 +228,19 @@ sub health {
 sub target_ports {
     my ($self) = @_;
     return [ sort grep { defined } map { PVE::SAN::Array::Base::norm_wwpn($_->{wwn}) } @{$self->items('/ports')} ];
+}
+
+sub supports_iscsi { return 1; }
+
+# Port: iqn and portal ("<IP>:<port>") are null unless the port is iSCSI
+sub target_portals {
+    my ($self) = @_;
+    my @res;
+    for my $p (@{$self->items('/ports')}) {
+        my ($addr, $port) = ($p->{portal} // '') =~ /^\[?([^\]]+?)\]?:(\d+)$/ or next;
+        push @res, { address => $addr, port => $port + 0, iqn => PVE::SAN::Array::Base::norm_iqn($p->{iqn}) };
+    }
+    return \@res;
 }
 
 sub remove_host {

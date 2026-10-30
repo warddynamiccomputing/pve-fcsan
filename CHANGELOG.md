@@ -4,6 +4,23 @@ The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
 ## Unreleased
+- iSCSI provisioning: an array setting `protocol` (`fc`, `iscsi` or `both`;
+  API, `pvesan array add/set --protocol`, the array dialog) chooses whether
+  the nodes' FC WWPNs, their iSCSI initiator names
+  (`/etc/iscsi/initiatorname.iscsi`) or both are registered on the array.
+  Registering an iSCSI array logs every node in to the array's target
+  portals (`sendtargets` discovery, `node.startup=automatic`, idempotent),
+  so provisioning works end to end on iSCSI.
+- iSCSI host registration and target portals for Pure FlashArray, IBM
+  Spectrum Virtualize, Dell PowerStore, INFINIDAT InfiniBox, NetApp ONTAP
+  (igroup protocol `iscsi` or `mixed`), NetApp E-Series, Hitachi VSP (iSCSI
+  target ports) and Dell PowerMax (iSCSI port group). Fujitsu ETERNUS
+  reports iSCSI host registration as not supported yet.
+- Node-local iSCSI steps: `pvesan iscsi status`, `pvesan iscsi login
+  <portal>`, `pvesan array iscsi-login <array>` for all nodes. Logged-in
+  portals are recorded in the cluster config and restored at boot by
+  `pvesan-sync.service` (`pvesan iscsi restore`), also on nodes that join
+  later. Array status and hosts list show IQNs.
 - New array driver: HPE Primera, Alletra 9000 and 3PAR StoreServ (`hpe-3par`)
   through the Web Services API (WSAPI). The cluster is a host set of hosts
   with persona 2 (Generic-ALUA), each volume is exported to the host set

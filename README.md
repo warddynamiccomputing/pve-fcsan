@@ -11,7 +11,7 @@ With an array driver it goes one step further, like the Pure Storage or
 INFINIDAT vSphere plugins: **one form creates the volume on the array, maps it
 to the cluster, rescans every node and builds the datastore.**
 
-> **Status: beta.** Everything below is implemented and covered by 1064
+> **Status: beta.** Everything below is implemented and covered by 1153
 > automated tests, and the plugin runs on a 6-node Proxmox VE 9.2 lab with
 > QLogic and Emulex HBAs. **No array driver has yet been exercised against a
 > real array.** Try each new array type with a small test datastore first, and
@@ -26,8 +26,8 @@ to the cluster, rescans every node and builds the datastore.**
 | Monitoring | Array view per datastore (pool capacity, written space, data reduction, array alerts), IOPS / throughput / latency per LUN, datastore → VMs and VM → LUN, path-health alerts through Proxmox notification targets, zoning hints, new nodes registered on the arrays automatically |
 | Devices | LUNs with paths, usage, cluster-wide alias and path policy (ALUA, round robin, MRU, fixed), detach/attach |
 | Datastores | Create on one or more LUNs, grow into an expanded LUN or add an extent, rename (label or storage ID), unmount/mount per node, reclaim free space (UNMAP), delete and detach |
-| Arrays | Add an array with a pinned TLS certificate, register the cluster's hosts, **provision a datastore end to end**, grow on the array, delete including the array volume |
-| Array snapshots | Snapshot a datastore on the array (on a schedule with retention, too), mount a snapshot as a read-only copy datastore, **restore one VM** from it over its disks or into a new VM, roll a whole datastore back (Pure, InfiniBox, PowerStore, NetApp ONTAP, IBM Spectrum Virtualize, HPE Alletra 5000/6000) |
+| Arrays | Add an array with a pinned TLS certificate, register the cluster's hosts by FC WWPN or iSCSI initiator name (and log every node in to the array's iSCSI portals), **provision a datastore end to end**, grow on the array, delete including the array volume |
+| Array snapshots | Snapshot a datastore on the array (on a schedule with retention, too), mount a snapshot as a read-only copy datastore, **restore one VM** from it over its disks or into a new VM, roll a whole datastore back (Pure, InfiniBox, PowerStore, NetApp ONTAP, IBM Spectrum Virtualize, HPE Primera / 3PAR, HPE Alletra 5000/6000) |
 | Space | Weekly automatic UNMAP reclaim per datastore; optional discard when a VM disk is deleted |
 | Per-disk volumes (**experimental**) | Storage type `fcsanvol`: every VM disk is its own array volume; snapshots, rollback, templates, linked clones and resize are array operations (Pure) |
 | Disaster recovery (**experimental**) | Replicate a datastore to a second array as one consistent group; its guest configs travel on the datastore; at the DR cluster run a **test failover** (isolated copy) or a **failover**, start guests in recovery-plan order, or import LUNs promoted by hand on any array (replication setup: Pure) |
@@ -56,6 +56,12 @@ Array snapshots, copies and restores work with the `pure`, `infinidat`,
 `dell-powerstore`, `netapp-ontap`, `ibm-sv`, `hpe-3par` and `hpe-nimble` drivers; the other drivers
 report them as not supported yet.
 
+Every driver except `fujitsu-eternus` can also register the nodes' **iSCSI**
+initiator names (array setting `--protocol iscsi`, or `both` for FC and
+iSCSI) and log every node in to the array's iSCSI target portals, so
+provisioning works end to end on iSCSI arrays too. See the runbook's iSCSI
+procedure.
+
 Every driver's requests were checked against the vendor's own SDK or tooling
 (PyPowerStore, PyU4V, InfiniSDK, Pure's generated SDK, NetApp's Ansible
 collections, OpenStack Cinder's Hitachi, 3PAR and Nimble drivers, HPE's
@@ -70,8 +76,9 @@ iSCSI array. Drivers only add the one-step provisioning, grow and delete.
 
 - Proxmox VE 8.x or 9.x on every node, all on the same pve-fcsan version
 - `multipath-tools` and `lvm2` (pulled in by the package)
-- Every node zoned to the array and in the array's host group / host cluster
-  (pvesan can create the host objects for you)
+- Every node zoned to the array (FC) or able to reach its iSCSI portals
+  (`open-iscsi`, installed on Proxmox VE by default), and in the array's
+  host group / host cluster (pvesan can create the host objects for you)
 
 ## Install
 
@@ -125,6 +132,10 @@ pvesan array register-cluster fs01
 pvesan provision fs01 gold01 --pool Pool0 --size 2048
 pvesan snapshot create gold01 --name before-upgrade  # array snapshot (Pure, InfiniBox, PowerStore, ONTAP, IBM SV)
 pvesan snapshot mount gold01 before-upgrade         # read-only copy datastore to restore VMs from
+
+# an iSCSI array: register the initiator names and log every node in
+pvesan array set fs01 --protocol iscsi
+pvesan array register-cluster fs01                  # hosts + iSCSI logins on every node
 ```
 
 ## Documentation

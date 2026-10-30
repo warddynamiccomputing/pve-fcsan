@@ -6,6 +6,7 @@ package PVE::SAN::Array::PowerMax;
 # Checked against Dell's PyU4V (PyU4V/provisioning.py). All objects live
 # under /univmax/restapi/<version>/sloprovisioning/symmetrix/<symid>/:
 #   host        POST host {hostId, initiatorId[]}
+#               (initiators are FC WWPNs or iSCSI names)
 #               PUT  host/<id> {editHostActionParam: {addInitiatorParam: {initiator[]}}}
 #   host group  POST hostgroup {hostGroupId, hostId[]}
 #               PUT  hostgroup/<id> {editHostGroupActionParam: {addHostParam: {host[]}}}
@@ -17,6 +18,8 @@ package PVE::SAN::Array::PowerMax;
 #   unmap       PUT  storagegroup/<sg> {...removeVolumeParam: {volumeId[]}}
 #   grow        PUT  volume/<dev> {editVolumeActionParam: {expandVolumeParam: {volumeAttribute}}}
 #   delete      PUT  volume/<dev> {...freeVolumeParam: {free_volume: true}}, then DELETE volume/<dev>
+#   iSCSI       GET portgroup/<pg> symmetrixPortKey; GET system/symmetrix/<id>/director/
+#               <dir>/port/<port> symmetrixPort {ip_addresses, identifier} (system.py)
 #
 # Mapping model: the Proxmox cluster gets a host group, a storage group
 # <hc>_SG (in the configured SRP / service level) and a masking view <hc>_MV
@@ -116,11 +119,13 @@ sub hosts {
     for my $id (@{($self->call('GET', '/host') // {})->{hostId} // []}) {
         my $h = $self->call('GET', "/host/$id") // {};
         my @hg = @{$h->{hostGroup} // []};
+        my @init = @{$h->{initiator} // []};
         push @res, {
             id => $id,
             name => $id,
             hostcluster => $hg[0],
-            wwpns => [ sort grep { defined } map { PVE::SAN::Array::Base::norm_wwpn($_) } @{$h->{initiator} // []} ],
+            wwpns => [ sort grep { defined } map { PVE::SAN::Array::Base::norm_wwpn($_) } @init ],
+            iqns => [ sort grep { defined } map { PVE::SAN::Array::Base::norm_iqn($_) } @init ],
         };
     }
     return \@res;
@@ -131,16 +136,19 @@ sub create_hostcluster {
     $self->{pending_group}->{$name} = 1; # created with its first host
 }
 
+# initiatorId takes WWPNs or iSCSI names alike (PyU4V create_host; Cinder's
+# PowerMax masking.py find_initiator_names)
 sub create_host {
-    my ($self, $name, $wwpns) = @_;
-    $self->call('POST', '/host', undef, { hostId => $name, initiatorId => [ map { lc } @$wwpns ] });
-    return { id => $name, name => $name, hostcluster => undef, wwpns => [@$wwpns] };
+    my ($self, $name, $wwpns, $iqns) = @_;
+    $iqns //= [];
+    $self->call('POST', '/host', undef, { hostId => $name, initiatorId => [ (map { lc } @$wwpns), @$iqns ] });
+    return { id => $name, name => $name, hostcluster => undef, wwpns => [@$wwpns], iqns => [@$iqns] };
 }
 
 sub add_host_ports {
-    my ($self, $host, $wwpns) = @_;
+    my ($self, $host, $wwpns, $iqns) = @_;
     $self->call('PUT', "/host/$host->{name}", undef,
-        { editHostActionParam => { addInitiatorParam => { initiator => [ map { lc } @$wwpns ] } } });
+        { editHostActionParam => { addInitiatorParam => { initiator => [ (map { lc } @$wwpns), @{$iqns // []} ] } } });
 }
 
 sub add_to_hostcluster {
@@ -151,6 +159,32 @@ sub add_to_hostcluster {
     } else {
         $self->call('POST', '/hostgroup', undef, { hostGroupId => $hcname, hostId => [ $host->{name} ] });
     }
+}
+
+sub supports_iscsi { return 1; }
+
+# The iSCSI ports of the configured port group: PyU4V get_port_group
+# (symmetrixPortKey [{directorId, portId}]) and get_iscsi_ip_address_and_iqn
+# (GET system/symmetrix/<id>/director/<dir>/port/<port> -> symmetrixPort
+# {ip_addresses, identifier = target IQN}). Cinder's PowerMax driver uses
+# port 3260.
+sub target_portals {
+    my ($self) = @_;
+    my $pg = $self->call('GET', "/portgroup/$self->{portgroup}") // {};
+    my @res;
+    for my $k (@{$pg->{symmetrixPortKey} // []}) {
+        my ($dir, $port) = ($k->{directorId}, $k->{portId});
+        next if !defined($dir) || !defined($port);
+        ($dir, $port) = split(/:/, $port, 2) if $port =~ /:/; # "SE-1E:000"
+        my $d = $self->json_call('GET', '/univmax/restapi/' . $self->api_version
+            . "/system/symmetrix/$self->{system_id}/director/" . PVE::SAN::Array::Base::escape($dir)
+            . '/port/' . PVE::SAN::Array::Base::escape($port),
+            undef, undef, { Authorization => $self->basic_auth }, \&error_text, 'Unisphere') // {};
+        my $sp = $d->{symmetrixPort} // {};
+        my $iqn = PVE::SAN::Array::Base::norm_iqn($sp->{identifier}) // next; # FC port: a WWN
+        push @res, map { { address => $_, port => 3260, iqn => $iqn } } @{$sp->{ip_addresses} // []};
+    }
+    return \@res;
 }
 
 # Host group as usual, then the storage group and masking view that

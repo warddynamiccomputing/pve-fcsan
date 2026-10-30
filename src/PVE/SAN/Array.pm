@@ -35,6 +35,7 @@ our $OPTION_KEYS = {
     'srp' => 'srp',
     'slo' => 'slo',
     'target-ports' => 'target_ports',
+    'protocol' => 'protocol', # fc, iscsi or both
     'auto-register' => 'auto_register', # not a driver setting: pvesan-monitor registers new nodes
 };
 
@@ -161,6 +162,34 @@ sub node_wwpns {
         ];
     }
     return $out;
+}
+
+# iSCSI initiator name per online node ({ node => [IQN] }), read by each
+# node from /etc/iscsi/initiatorname.iscsi.
+sub node_iqns {
+    my ($nodes) = @_;
+    $nodes //= PVE::SAN::Cluster::nodes();
+    my $res = PVE::SAN::Cluster::on_nodes($nodes, 'reading iSCSI initiator name', 'GET', 'iscsi');
+    return { map {
+        my $iqn = ($res->{$_} // {})->{initiator};
+        ($_ => [ $iqn ? lc($iqn) : () ])
+    } @$nodes };
+}
+
+sub protocol {
+    my ($cfg) = @_;
+    return $cfg->{protocol} // 'fc';
+}
+
+# Ports per online node for an array protocol (fc, iscsi or both):
+# { node => [WWPN or IQN, ...] }.
+sub node_ports {
+    my ($protocol, $nodes) = @_;
+    $protocol //= 'fc';
+    my $fc = $protocol ne 'iscsi' ? node_wwpns($nodes) : {};
+    my $iscsi = $protocol ne 'fc' ? node_iqns($nodes) : {};
+    my %all = map { ($_ => 1) } keys %$fc, keys %$iscsi;
+    return { map { ($_ => [ @{$fc->{$_} // []}, @{$iscsi->{$_} // []} ]) } keys %all };
 }
 
 # Arrays as listed in the API/GUI (no secrets).

@@ -1,12 +1,15 @@
 [Unit]
-Description=Apply pvesan SAN configuration (multipath aliases, policies, detached LUNs)
-After=pve-cluster.service multipathd.service
-Wants=multipathd.service
+Description=Apply pvesan SAN configuration (iSCSI logins, multipath aliases, policies, detached LUNs)
+After=pve-cluster.service multipathd.service iscsid.service open-iscsi.service network-online.target
+Wants=multipathd.service network-online.target
 Requires=pve-cluster.service
 Before=pvestatd.service pve-guests.service
 
 [Service]
 Type=oneshot
+# log in to recorded iSCSI portals first, so their LUNs get multipath maps;
+# a failure there must not keep the rest of the configuration from applying
+ExecStart=-/usr/sbin/pvesan iscsi restore
 ExecStart=/usr/sbin/pvesan sync
 RemainAfterExit=yes
 
