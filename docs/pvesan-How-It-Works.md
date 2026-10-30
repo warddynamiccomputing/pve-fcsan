@@ -170,6 +170,7 @@ Array drivers turn pvesan from a SAN manager into a provisioning tool. The array
 | NetApp E-Series | `/devmgr/v2/storage-systems/<ssid>` | SANtricity Ansible collection | Host group (Linux DM-MP host type) | `wwn` |
 | Hitachi VSP | `/ConfigurationManager/v1/objects/storages/<id>`, session token, jobs awaited | OpenStack Cinder Hitachi driver, Configuration Manager reference | One host group per target port; LU path on each | `naaId` (known after mapping) |
 | Fujitsu ETERNUS DX S5 / AF S3 | `:5665/api/v1/...`, `POST session` → Bearer token, jobs awaited and deleted | ETERNUS RESTful API Reference (P3AG-5492) | One FC host per WWN (the API has no host groups); every volume connected to all of them with one host LUN | `3` + `uid` |
+| Dell Unity XT | `/api/types/...`, `/api/instances/...`, Basic auth + `X-EMC-REST-CLIENT: true`; `EMC-CSRF-TOKEN` and session cookie from a GET for writes | storops (`unity/client.py`, `unity/resource/*.py`), OpenStack Cinder Unity driver | One host per node with its FC initiators (WWNN:WWPN); no host groups, so every LUN's host access lists all node hosts | `3` + `wwn` |
 
 ### Array snapshots and copies
 
@@ -182,6 +183,7 @@ Array drivers turn pvesan from a SAN manager into a provisioning tool. The array
 | Dell PowerStore | `POST volume/<id>/snapshot` `{name}` | Write-order consistent volume group `pvesan-<vol>`, `POST volume_group/<id>/snapshot` | `POST volume/<snap>/clone` | `POST volume/<id>/restore`, or `POST volume_group/<id>/restore` for a set, both with `create_backup_snap` | PyPowerStore (`protection.py`, `provisioning.py`, `utils/constants.py`) |
 | NetApp ONTAP | `POST storage/volumes/<flexvol>/snapshots` `{name}` (the LUN's own FlexVol) | Not yet (consistency groups) | FlexClone `POST storage/volumes` `{clone.parent_volume.name, clone.parent_snapshot.name, clone.is_flexclone}`; its `lun0` | `PATCH storage/volumes/<flexvol>` `{restore_to.snapshot.name}` | NetApp Ansible (`na_ontap_snapshot`, `na_ontap_volume`, `na_ontap_volume_clone`) |
 | IBM Spectrum Virtualize | Thin target `pvs_<vol id>_<name>`, `mkfcmap -copyrate 0`, `prestartfcmap`, `startfcmap` | FlashCopy consistency group `pvs_<name>_<first id>` (`mkfcconsistgrp`, `startfcconsistgrp`) | Thin volume fed by `mkfcmap -copyrate 50 -autodelete` from the snapshot | `mkfcmap` snapshot → volume, `prestartfcmap -restore`, `startfcmap -restore` | OpenStack Cinder Storwize/SVC driver (`storwize_svc_common.py`) |
+| Dell Unity XT | `POST types/snap/instances` `{storageResource, name}` | Consistency group `pvesan-<vol>` (`createConsistencyGroup`, `modifyConsistencyGroup` `{lunAdd}`), snapshot of the group; member LUNs are changed through `lunModify` | Thin clone `createLunThinClone` `{name, snap}` (thin LUNs; not for group members) | `POST instances/snap/<id>/action/restore`, the backup snapshot deleted afterwards | storops (`snap.py`, `cg.py`, `thinclone_helper.py`), Cinder Unity `client.py` |
 
 A **snapshot set** is every array snapshot with the same pvesan name across the datastore's volumes (`group_sets`); a set missing a volume is listed as incomplete and can't be mounted or rolled back. A group snapshot (Pure protection group) is deleted once, not per member.
 
@@ -306,7 +308,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 
 **Layers.** `Util`, `Sysfs`, `Multipath` (parsing/rendering) and `LVM` (parsing) are pure Perl and read sysfs through `PVESAN_SYSFS_ROOT`, so a fixture tree replaces `/sys`. `Inventory`, `Ops`, `Config` and `Cluster` add Proxmox VE and command execution; `Datastore` and `Provision` compose them; `API2::SAN` exposes them; the CLI and GUI sit only on the API.
 
-**Tests** (`make test`, 861 checks):
+**Tests** (`make test`, 949 checks):
 
 | File | Covers |
 | --- | --- |
@@ -321,6 +323,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 | `t/70-volumes.t` | `fcsanvol`: names and aliases, Pure's per-disk primitives, allocation with rollback on failure, the LUN limit, targeted activation, resize, snapshots, rollback, templates, linked clones, delete, and the plugin's features |
 | `t/71-dr.t` | DR metadata slots (checksum, generations, torn slots), recovery plans, VM ID offsets and disk renames, guest configs for test and failover (VMs and containers), the metadata timer job, Pure's replication primitives against a fake array, and the replicate, planned-failover, test-failover, cleanup, failover and manual-import workflows against a fake driver |
 | `t/72-snapshots-more.t` | Snapshots on NetApp ONTAP (FlexVol snapshots, FlexClone copies, restore, its own snapshots hidden, layout and serial checks) and IBM Spectrum Virtualize (FlashCopy targets, consistency groups, background copies, restore, clean-up after a failure) against stateful fake arrays |
+| `t/75-unity.t` | Dell Unity XT against a stateful fake array: CSRF token and session cookie, request bodies, one host per node with WWNN:WWPN initiators, the volume lifecycle, host access lists, snapshots, thin clones, restore, consistency groups and the error format |
 | `t/80-integrate.t` | `pvesan-integrate` against a fake pve-manager tree: insertion point, upgrade from an older line, refusal without the anchor, exact removal, and that the patched `Nodes.pm` still loads with a broken pve-fcsan |
 | `t/90-compile.t` | Loads every module; fails on compile warnings. Uses the real Proxmox VE libraries when present, stubs otherwise |
 

@@ -218,7 +218,7 @@ EOF
     is_deeply($st{pgroups}->{'pvesan-gold'}->{targets}, [], 'Pure: target removed');
 }
 
-for my $class (qw(IBMSV Infinidat PowerStore PowerMax ONTAP ESeries Hitachi Eternus)) {
+for my $class (qw(IBMSV Infinidat PowerStore PowerMax ONTAP ESeries Hitachi Eternus Unity)) {
     my $c = "PVE::SAN::Array::$class";
     eval "require $c" or die $@;
     ok(!$c->supports_replication, "$class: replication not offered yet");

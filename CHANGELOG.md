@@ -35,6 +35,12 @@ the readable summary.
 - Dell PowerStore: datastores on several volumes are snapshotted at one
   point in time through a write-order consistent volume group, and restored
   as a group.
+- New array driver: Dell Unity XT (`dell-unity`), using the Unisphere
+  Management REST API. Unity has no host groups, so every node is one Unity
+  host with its FC initiators and each LUN's host access lists all of them.
+  Array snapshots: LUN snapshots, copies as thin clones, restore; datastores
+  on several LUNs are snapshotted through a consistency group (rollback
+  only, Unity cannot thin-clone a group member).
 
 ## 1.5.0
 - Array snapshots of datastores (Pure FlashArray, INFINIDAT InfiniBox, Dell

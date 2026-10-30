@@ -303,14 +303,15 @@ pvesan provision fs01 gold01 --pool Pool0 --size 2048 --thin 1 --label "Gold 01"
 | NetApp E-Series | `netapp-eseries` | 8443 | Storage admin | `--system-id` (default `1`) | Host group | Pool / DDP | Thick volumes only; names up to 30 characters |
 | Hitachi VSP | `hitachi-vsp` | 443 (embedded) or your Configuration Manager port | Storage Administrator (Provisioning) | `--target-ports` (required, e.g. `CL1-A,CL2-A`); `--system-id` | One host group per target port (host mode LINUX/IRIX) | DP pool | LU path on every target port; WWID known after mapping |
 | Fujitsu ETERNUS DX S5 / AF S3 | `fujitsu-eternus` | 5665 (enable the RESTful API and open the port in the firewall settings) | User with the Admin or StorageAdmin role | — | One FC host per HBA port (`<node>_<n>`) | Thin provisioning pool (TPP) | Firmware V11L40 or later; host affinity enabled on the CA ports; the cluster's hosts must not share a LUN group with other hosts |
+| Dell Unity XT | `dell-unity` | 443 | Unisphere user with the Storage Administrator role | — | One host per node with its FC initiators; every LUN's host access lists all of them | Pool | Thin or thick; zone the nodes first so the array sees their initiators log in (otherwise pvesan takes each port's WWNN from the node). Copies of snapshots are thin clones (thin LUNs, single-LUN datastores) |
 
-**Array snapshots** (P13 to P15) work with `pure`, `infinidat`, `dell-powerstore`, `netapp-ontap` and `ibm-sv`. `dell-powermax`, `netapp-eseries`, `hitachi-vsp` and `fujitsu-eternus` report them as not supported yet.
+**Array snapshots** (P13 to P15) work with `pure`, `infinidat`, `dell-powerstore`, `netapp-ontap`, `ibm-sv` and `dell-unity`. `dell-powermax`, `netapp-eseries`, `hitachi-vsp` and `fujitsu-eternus` report them as not supported yet.
 
 **First use with a new array type:** before your first production datastore, provision and delete a 10 GiB test datastore. Every driver's calls were checked against the vendor's own SDK or tooling, but real-array results are still being collected. If a step fails, the task log shows the array's own error code; please report it.
 
 ### P13. Array snapshots of a datastore
 
-Array snapshots are taken by the array in seconds and cost no host I/O. They work for array-linked datastores on **Pure FlashArray**, **INFINIDAT InfiniBox**, **Dell PowerStore**, **NetApp ONTAP** and **IBM Spectrum Virtualize**; the other drivers report "not supported yet". A datastore on several array volumes is snapshotted at one point in time: Pure uses a protection group `pvesan-<first volume>`, InfiniBox a group snapshot, PowerStore a write-order consistent volume group `pvesan-<first volume>`, IBM a FlashCopy consistency group. On ONTAP only single-LUN datastores can be snapshotted yet (one FlexVol per LUN; several would need a consistency group).
+Array snapshots are taken by the array in seconds and cost no host I/O. They work for array-linked datastores on **Pure FlashArray**, **INFINIDAT InfiniBox**, **Dell PowerStore**, **NetApp ONTAP**, **IBM Spectrum Virtualize** and **Dell Unity XT**; the other drivers report "not supported yet". A datastore on several array volumes is snapshotted at one point in time: Pure uses a protection group `pvesan-<first volume>`, InfiniBox a group snapshot, PowerStore a write-order consistent volume group `pvesan-<first volume>`, IBM a FlashCopy consistency group, Unity a consistency group `pvesan-<first volume>` (the LUNs stay in it). On ONTAP only single-LUN datastores can be snapshotted yet (one FlexVol per LUN; several would need a consistency group). On Unity a snapshot of a multi-LUN datastore can be rolled back but not mounted as a copy: Unity cannot thin-clone a member of a consistency group snapshot.
 
 Snapshots are **crash-consistent**: running VMs are not paused, so their disks look as if the power had been cut at that moment. For application consistency, shut the VM down or quiesce the application first.
 
@@ -535,6 +536,7 @@ Every node checks that each LUN of each enabled datastore it should see is prese
 | NetApp E-Series | 30 | — |
 | Hitachi VSP (`OPEN-`) | 10 | — |
 | Fujitsu ETERNUS DX | 10 | — |
+| Dell Unity XT (`DGC`) | 60 | — |
 
 The built-in values are from multipath-tools' hardware table and change between versions; `multipath -t` shows the ones in force on a node. Set or change the value per LUN in **Devices → Properties → No path retry** or with `pvesan device set <wwid> --no-path-retry 12` (`--delete no-path-retry` returns to the built-in value); it applies on every node.
 

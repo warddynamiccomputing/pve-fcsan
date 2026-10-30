@@ -49,15 +49,16 @@ migration, HA and Proxmox VE 9 volume-chain snapshots work as on shared LVM.
 | NetApp E-Series | `netapp-eseries` | SANtricity Web Services |
 | Hitachi VSP | `hitachi-vsp` | Configuration Manager REST |
 | Fujitsu ETERNUS DX S5 / AF S3 | `fujitsu-eternus` | ETERNUS RESTful API, port 5665 (firmware V11L40+) |
+| Dell Unity XT | `dell-unity` | Unisphere Management REST |
 
 Array snapshots, copies and restores work with the `pure`, `infinidat`,
-`dell-powerstore`, `netapp-ontap` and `ibm-sv` drivers; the other drivers
-report them as not supported yet.
+`dell-powerstore`, `netapp-ontap`, `ibm-sv` and `dell-unity` drivers; the other
+drivers report them as not supported yet.
 
 Every driver's requests were checked against the vendor's own SDK or tooling
 (PyPowerStore, PyU4V, InfiniSDK, Pure's generated SDK, NetApp's Ansible
 collections, OpenStack Cinder's Hitachi driver, Fujitsu's ETERNUS RESTful API
-Reference).
+Reference, Dell's storops and OpenStack Cinder's Unity driver).
 
 **A driver is optional.** If your storage team creates and maps the LUNs, or
 you do it in the array's own GUI, add no array at all: pvesan discovers the
