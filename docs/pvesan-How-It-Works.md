@@ -1,6 +1,6 @@
 # pve-fcsan: How It Works
 
-Version 1.5.0
+Version 1.6.0
 
 ## Goals and the stack mapping
 
@@ -216,7 +216,7 @@ A **snapshot set** is every array snapshot with the same pvesan name across the 
 
 ### Per-disk array volumes (`fcsanvol`, experimental)
 
-> **Experimental in 1.5.0:** Pure FlashArray only, raw VM disks only, and not yet run on a real array.
+> **Experimental (since 1.5.0):** Pure FlashArray only, raw VM disks only, and not yet run on a real array.
 
 `PVE::Storage::Custom::FCSANVolPlugin` is a second storage type that maps the Proxmox storage plugin API onto array volumes; `PVE::SAN::Volume` holds the logic so it is unit tested without Proxmox.
 

@@ -3,7 +3,26 @@
 The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
-## Unreleased
+## 1.6.0
+- New array driver: HPE Primera, Alletra 9000 and 3PAR StoreServ (`hpe-3par`)
+  through the Web Services API (WSAPI). The cluster is a host set of hosts
+  with persona 2 (Generic-ALUA), each volume is exported to the host set
+  with one LUN, and pools are CPGs. Array snapshots are virtual copies;
+  datastores on several volumes are snapshotted through a volume set,
+  copies are online physical copies and restore promotes the virtual copy.
+  Requests checked against HPE's python-3parclient and OpenStack Cinder's
+  3PAR driver.
+- New array driver: HPE Alletra 5000 / 6000 and Nimble Storage (`hpe-nimble`),
+  using the NimOS REST API on port 5392. The cluster is one FC initiator
+  group; volumes are presented through access control records. Array
+  snapshots, copies (clones) and restores; datastores on several volumes are
+  snapshotted through a volume collection and its snapshot collections.
+- New array driver: Dell Unity XT (`dell-unity`), using the Unisphere
+  Management REST API. Unity has no host groups, so every node is one Unity
+  host with its FC initiators and each LUN's host access lists all of them.
+  Array snapshots: LUN snapshots, copies as thin clones, restore; datastores
+  on several LUNs are snapshotted through a consistency group (rollback
+  only, Unity cannot thin-clone a group member).
 - iSCSI provisioning: an array setting `protocol` (`fc`, `iscsi` or `both`;
   API, `pvesan array add/set --protocol`, the array dialog) chooses whether
   the nodes' FC WWPNs, their iSCSI initiator names
@@ -21,14 +40,18 @@ the readable summary.
   portals are recorded in the cluster config and restored at boot by
   `pvesan-sync.service` (`pvesan iscsi restore`), also on nodes that join
   later. Array status and hosts list show IQNs.
-- New array driver: HPE Primera, Alletra 9000 and 3PAR StoreServ (`hpe-3par`)
-  through the Web Services API (WSAPI). The cluster is a host set of hosts
-  with persona 2 (Generic-ALUA), each volume is exported to the host set
-  with one LUN, and pools are CPGs. Array snapshots are virtual copies;
-  datastores on several volumes are snapshotted through a volume set,
-  copies are online physical copies and restore promotes the virtual copy.
-  Requests checked against HPE's python-3parclient and OpenStack Cinder's
-  3PAR driver.
+- Array snapshots on NetApp ONTAP: snapshots of the LUN's own FlexVol,
+  copies as FlexClones, restore of the FlexVol to a snapshot; ONTAP's own
+  scheduled snapshots are not listed. Single-LUN datastores only.
+- Array snapshots on IBM Spectrum Virtualize (FlashSystem, SVC): FlashCopy
+  snapshots (thin targets, no background copy), several volumes at one point
+  in time through a FlashCopy consistency group, copies fed from a snapshot
+  in the background, restore with a reverse FlashCopy.
+- Dell PowerStore: datastores on several volumes are snapshotted at one
+  point in time through a write-order consistent volume group, and restored
+  as a group.
+- Pure FlashArray: the replication schedule's own snapshots no longer show
+  in the datastore's snapshot list.
 - Hardening: `fc-discard` uses the LVM plugin's own background discard
   (`on-volume-remove=discard=1`) where it exists, so large disks are
   discarded outside the 60 s storage lock.
@@ -58,29 +81,6 @@ the readable summary.
 - Planned failover from the primary site: shut the guests down in reverse
   plan order, write their configs, unmount the datastore and send a final
   replica (`pvesan dr prepare-failover`).
-- Pure FlashArray: the replication schedule's own snapshots no longer show
-  in the datastore's snapshot list.
-- Array snapshots on NetApp ONTAP: snapshots of the LUN's own FlexVol,
-  copies as FlexClones, restore of the FlexVol to a snapshot; ONTAP's own
-  scheduled snapshots are not listed. Single-LUN datastores only.
-- Array snapshots on IBM Spectrum Virtualize (FlashSystem, SVC): FlashCopy
-  snapshots (thin targets, no background copy), several volumes at one point
-  in time through a FlashCopy consistency group, copies fed from a snapshot
-  in the background, restore with a reverse FlashCopy.
-- Dell PowerStore: datastores on several volumes are snapshotted at one
-  point in time through a write-order consistent volume group, and restored
-  as a group.
-- New array driver: Dell Unity XT (`dell-unity`), using the Unisphere
-  Management REST API. Unity has no host groups, so every node is one Unity
-  host with its FC initiators and each LUN's host access lists all of them.
-  Array snapshots: LUN snapshots, copies as thin clones, restore; datastores
-  on several LUNs are snapshotted through a consistency group (rollback
-  only, Unity cannot thin-clone a group member).
-- New array driver: HPE Alletra 5000 / 6000 and Nimble Storage (`hpe-nimble`),
-  using the NimOS REST API on port 5392. The cluster is one FC initiator
-  group; volumes are presented through access control records. Array
-  snapshots, copies (clones) and restores; datastores on several volumes are
-  snapshotted through a volume collection and its snapshot collections.
 
 ## 1.5.0
 - Array snapshots of datastores (Pure FlashArray, INFINIDAT InfiniBox, Dell
