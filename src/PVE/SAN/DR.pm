@@ -634,8 +634,10 @@ sub import_luns {
 
     my ($meta, $map, $imported);
     my $ok = eval {
-        PVE::SAN::Provision::wait_visible($nodes, $_, $p{timeout}) for @$wwids;
-        my $devs = PVE::SAN::Datastore::register_devices($nodes, $storeid, $wwids, 0);
+        # this node imports first; the others see the LUNs once their UUIDs are new
+        my $here = [ PVE::SAN::Cluster::local_node() ];
+        PVE::SAN::Provision::wait_visible($here, $_, $p{timeout}) for @$wwids;
+        my $devs = PVE::SAN::Datastore::register_devices($here, $storeid, $wwids, 0);
         print "importing the volume group as '$vg' (new PV and VG UUIDs)\n";
         run_cmd(['vgimportclone', '--basevgname', $vg,
             (PVE::SAN::LVM::devicesfile_enabled() ? ('--importdevices') : ()), @$devs], timeout => 300);
@@ -692,6 +694,7 @@ sub import_luns {
         content => 'images,rootdir',
         'fc-wwids' => join(',', @$wwids),
     });
+    PVE::SAN::Provision::wait_visible($nodes, $_, $p{timeout}) for @$wwids;
     PVE::SAN::Cluster::on_nodes($nodes, 'refreshing LVM device lists', 'POST', 'sync');
 
     my @created;

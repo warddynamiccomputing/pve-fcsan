@@ -30,6 +30,8 @@ my @modules = qw(
     PVE::SAN::Array::ESeries
     PVE::SAN::Array::Hitachi
     PVE::SAN::Array::Eternus
+    PVE::SAN::Array::Nimble
+    PVE::SAN::Array::HPE3PAR
     PVE::SAN::Provision
     PVE::SAN::Snapshot
     PVE::SAN::DR

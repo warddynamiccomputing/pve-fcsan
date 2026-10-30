@@ -110,13 +110,25 @@ sub activate_storage {
     return $class->SUPER::activate_storage($storeid, $scfg, $cache);
 }
 
-# Opt-in discard of a removed volume (fc-discard). With saferemove PVE
-# already wipes the volume, so nothing is added then. A discard that fails
-# (LUN without UNMAP) only warns; the removal goes on.
+# Does the running LVM plugin discard removed volumes itself
+# (on-volume-remove=discard=1, libpve-storage-perl 9.1+)? It renames the LV
+# inside the storage lock and discards in a cleanup worker after it.
+sub native_discard {
+    my $opts = PVE::Storage::LVMPlugin->options() // {};
+    return $opts->{'on-volume-remove'} ? 1 : 0;
+}
+
+# Opt-in discard of a removed volume (fc-discard). Where the LVM plugin can
+# discard itself, fc-discard turns that on, so the discard runs outside the
+# storage lock. Otherwise it is done here before the removal; with
+# saferemove PVE already wipes the volume, so nothing is added then. A
+# discard that fails (LUN without UNMAP) only warns; the removal goes on.
 sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase, $format) = @_;
 
-    if ($scfg->{'fc-discard'} && !$scfg->{saferemove} && $volname =~ m/^[A-Za-z0-9_.+-]+$/) {
+    if ($scfg->{'fc-discard'} && native_discard()) {
+        $scfg = { %$scfg, 'on-volume-remove' => 'discard=1' } if !$scfg->{'on-volume-remove'};
+    } elsif ($scfg->{'fc-discard'} && !$scfg->{saferemove} && $volname =~ m/^[A-Za-z0-9_.+-]+$/) {
         my $lv = "$scfg->{vgname}/$volname";
         eval {
             PVE::Tools::run_command(['lvchange', '-ay', $lv]);

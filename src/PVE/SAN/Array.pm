@@ -23,6 +23,8 @@ our $DRIVERS = {
     'netapp-eseries' => 'PVE::SAN::Array::ESeries',
     'hitachi-vsp' => 'PVE::SAN::Array::Hitachi',
     'fujitsu-eternus' => 'PVE::SAN::Array::Eternus',
+    'hpe-nimble' => 'PVE::SAN::Array::Nimble',
+    'hpe-3par' => 'PVE::SAN::Array::HPE3PAR',
 };
 
 # vendor specific array settings (API name => config/driver key)
