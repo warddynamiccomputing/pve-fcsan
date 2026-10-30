@@ -23,6 +23,7 @@ our $DRIVERS = {
     'netapp-eseries' => 'PVE::SAN::Array::ESeries',
     'hitachi-vsp' => 'PVE::SAN::Array::Hitachi',
     'fujitsu-eternus' => 'PVE::SAN::Array::Eternus',
+    'dell-unity' => 'PVE::SAN::Array::Unity',
     'hpe-nimble' => 'PVE::SAN::Array::Nimble',
     'hpe-3par' => 'PVE::SAN::Array::HPE3PAR',
 };
@@ -160,6 +161,20 @@ sub node_wwpns {
             map { uc($_->{wwpn} =~ s/://gr) }
             grep { $_->{transport} eq 'fc' && $_->{wwpn} } @{$res->{$node} // []}
         ];
+    }
+    return $out;
+}
+
+# { WWPN => WWNN } of the online nodes' FC ports (Unity names an FC
+# initiator by both).
+sub node_wwnns {
+    my ($nodes) = @_;
+    $nodes //= PVE::SAN::Cluster::nodes();
+    my $res = PVE::SAN::Cluster::on_nodes($nodes, 'reading FC ports', 'GET', 'adapters');
+    my $out = {};
+    for my $ad (map { @{$res->{$_} // []} } @$nodes) {
+        next if $ad->{transport} ne 'fc' || !$ad->{wwpn} || !$ad->{wwnn};
+        $out->{uc($ad->{wwpn} =~ s/://gr)} = uc($ad->{wwnn} =~ s/://gr);
     }
     return $out;
 }

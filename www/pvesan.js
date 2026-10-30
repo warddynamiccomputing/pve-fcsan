@@ -109,6 +109,14 @@ Ext.define('PVE.san.Utils', {
 	    roleHint: gettext('Needs controller firmware V11L40 or later with the RESTful API enabled and port 5665 open in the array firewall settings. Use a user with the Admin or StorageAdmin role. pvesan registers each node HBA port as an FC host and connects every volume to all of them; enable host affinity on the CA ports zoned to the cluster. Pools are thin provisioning pools.'),
 	    certHint: gettext('ETERNUS Web GUI: the RESTful API uses the Web GUI SSL certificate.'),
 	},
+	'dell-unity': {
+	    name: 'Dell Unity XT (Unisphere REST)',
+	    port: 443,
+	    username: true,
+	    secretLabel: gettext('Password'),
+	    roleHint: gettext('Use a Unisphere user with the Storage Administrator role. Unity has no host groups: pvesan creates one host per node with its FC initiators and gives every LUN access from all of them. Zone the nodes first so the array sees their initiators. Copies of snapshots are thin clones.'),
+	    certHint: gettext('Unisphere: the management certificate shown by your browser for the Unisphere address.'),
+	},
 	'hpe-nimble': {
 	    name: 'HPE Alletra 5000/6000 (Nimble)',
 	    port: 5392,
