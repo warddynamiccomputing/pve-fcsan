@@ -213,7 +213,7 @@ my $json = JSON::PP->new->canonical;
     my $c = $drv->snapshot_clone($s->[0], 'gold-snap-1');
     my ($cm) = grep { $_->{target_vdisk_name} eq 'gold-snap-1' } values %{$st{maps}};
     is($cm->{source_vdisk_id}, '100', 'IBM: copy fed from the snapshot volume');
-    is($cm->{copy_rate}, '50', 'IBM: copy runs in the background');
+    is($cm->{copy_rate}, '100', 'IBM: copy runs in the background at the default rate (64 MiB/s)');
     ok($cm->{autodelete}, 'IBM: copy mapping deletes itself when done');
     like($c->{wwid}, qr/^3600507680c8101234/, 'IBM: copy is a normal volume');
     is_deeply([ map { $_->{name} } @{$drv->snapshots([ '5' ])} ], [ 'before-upgrade', 'cg1' ], 'IBM: copy is not a snapshot');
@@ -223,6 +223,7 @@ my $json = JSON::PP->new->canonical;
     my ($rm) = grep { $_->{target_vdisk_id} eq '5' } values %{$st{maps}};
     is($rm->{source_vdisk_id}, '100', 'IBM: restore mapping from the snapshot onto the volume');
     ok($rm->{restore}, 'IBM: prepared with -restore');
+    is($rm->{copy_rate}, '100', 'IBM: restore copies at the default rate');
     ok((grep { /^startfcmap $rm->{id} .*restore/ } @{$st{log}}), 'IBM: started with -restore');
     eval { $drv->snapshot_restore('6', $s->[0]) };
     like($@, qr/differ in size/, 'IBM: restore onto a volume of another size refused');
@@ -235,6 +236,27 @@ my $json = JSON::PP->new->canonical;
     $drv->snapshot_delete($s->[0]);
     ok(!$st{vdisks}->{100}, 'IBM: snapshot target removed');
     is_deeply($drv->snapshots([ '5', '6' ]), [], 'IBM: no snapshots left');
+
+    # copy-rate array setting
+    my $fast = PVE::SAN::Array::IBMSV->new(address => 'fs', username => 'u', password => 'p',
+        transport => $transport, copy_rate => '130');
+    my $s2 = $fast->snapshot_create([ '5' ], 'fast');
+    $fast->snapshot_clone($s2->[0], 'gold-fast-1');
+    my ($fm) = grep { $_->{target_vdisk_name} eq 'gold-fast-1' } values %{$st{maps}};
+    is($fm->{copy_rate}, '130', 'IBM: copy uses the copy-rate setting');
+    delete $st{maps}->{$fm->{id}};
+    $fast->snapshot_restore('5', $s2->[0]);
+    my ($fr) = grep { $_->{target_vdisk_id} eq '5' } values %{$st{maps}};
+    is($fr->{copy_rate}, '130', 'IBM: restore uses the copy-rate setting');
+    my ($snapmap) = grep { $_->{target_vdisk_name} eq 'pvs_5_fast' } values %{$st{maps}};
+    is($snapmap->{copy_rate}, '0', 'IBM: snapshots still have no background copy');
+    for my $bad ('0', '151', 'fast', '1.5') {
+        eval { PVE::SAN::Array::IBMSV->new(address => 'fs', username => 'u', password => 'p',
+            transport => $transport, copy_rate => $bad) };
+        like($@, qr/'copy-rate' must be a whole number from 1 to 150/, "IBM: copy-rate '$bad' refused");
+    }
+    ok(PVE::SAN::Array::IBMSV->new(address => 'fs', username => 'u', password => 'p',
+        transport => $transport, copy_rate => '150'), 'IBM: copy-rate 150 accepted');
 }
 
 done_testing();

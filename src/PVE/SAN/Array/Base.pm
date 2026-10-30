@@ -61,7 +61,7 @@ sub default_policy { return 'array-default'; } # multipath-tools' built-in table
 sub max_name_length { return 63; }
 
 # Vendor specific settings this driver uses: { option => required? }.
-# Options: system_id, svm, portgroup, srp, slo, target_ports.
+# Options: system_id, svm, portgroup, srp, slo, target_ports, copy_rate.
 sub options { return {}; }
 
 sub check_options {

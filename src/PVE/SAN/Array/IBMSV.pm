@@ -22,6 +22,27 @@ sub default_no_path_retry { return 12; }
 sub default_port { return 7443; }
 sub default_policy { return 'alua'; }
 
+# Background copy rate for copies and restores (FlashCopy -copyrate 1..150).
+# 50, Cinder's default, is only 2 MiB/s: a 1 TiB copy would take 6 days.
+# 100 is 64 MiB/s; every 10 above doubles it, up to 2 GiB/s at 150.
+our $DEFAULT_COPY_RATE = 100;
+
+sub options { return { copy_rate => 0 }; }
+
+sub check_options {
+    my ($class, $cfg) = @_;
+    $class->SUPER::check_options($cfg);
+    my $r = $cfg->{copy_rate};
+    die "array setting 'copy-rate' must be a whole number from 1 to 150\n"
+        if defined($r) && length($r) && ($r !~ /^\d+$/ || $r < 1 || $r > 150);
+}
+
+sub copy_rate {
+    my ($self) = @_;
+    my $r = $self->{copy_rate};
+    return defined($r) && length($r) ? $r + 0 : $DEFAULT_COPY_RATE;
+}
+
 sub base_url {
     my ($self) = @_;
     return "https://" . $self->host_port . "/rest/v1";
@@ -467,7 +488,7 @@ sub snapshot_clone {
     my $c = $self->thin_like($snap->{id}, $name);
     my $map;
     eval {
-        $map = $self->mkfcmap($snap->{id}, $c->{id}, copyrate => 50, autodelete => 1);
+        $map = $self->mkfcmap($snap->{id}, $c->{id}, copyrate => $self->copy_rate, autodelete => 1);
         $self->run_fc('map', $map);
     };
     if (my $err = $@) {
@@ -484,7 +505,7 @@ sub snapshot_restore {
     my $s = $self->volume($snap->{id});
     die "volume $vol and snapshot $snap->{name} differ in size - restore refused\n"
         if ($v->{capacity} // 0) != ($s->{capacity} // -1);
-    my $map = $self->mkfcmap($snap->{id}, $vol, copyrate => 50, autodelete => 1);
+    my $map = $self->mkfcmap($snap->{id}, $vol, copyrate => $self->copy_rate, autodelete => 1);
     $self->run_fc('map', $map, 1);
 }
 

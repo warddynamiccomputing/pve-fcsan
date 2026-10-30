@@ -3,6 +3,12 @@
 The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
+## Unreleased
+- IBM Spectrum Virtualize: snapshot copies and restores now copy in the
+  background at FlashCopy copy rate 100 (64 MiB/s) instead of 50 (2 MiB/s,
+  about 6 days for 1 TiB), and the new array setting `copy-rate` (1 to 150)
+  changes it, from the CLI or the GUI.
+
 ## 1.6.0
 - New array driver: HPE Primera, Alletra 9000 and 3PAR StoreServ (`hpe-3par`)
   through the Web Services API (WSAPI). The cluster is a host set of hosts

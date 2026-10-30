@@ -39,6 +39,7 @@ Ext.define('PVE.san.Utils', {
 	    secretLabel: gettext('Password'),
 	    roleHint: gettext('Use a dedicated array user with the Administrator role (creates hosts, volumes and mappings).'),
 	    certHint: gettext('IBM: Settings > Security > Secure Communications.'),
+	    fields: { 'copy-rate': false },
 	},
 	'pure': {
 	    name: 'Pure Storage FlashArray',
@@ -142,6 +143,8 @@ Ext.define('PVE.san.Utils', {
 	{ name: 'srp', label: 'SRP', emptyText: 'SRP_1' },
 	{ name: 'slo', label: gettext('Service level'), emptyText: gettext('none (Optimized)') },
 	{ name: 'target-ports', label: gettext('Target ports'), emptyText: 'CL1-A,CL2-A' },
+	{ name: 'copy-rate', label: gettext('Copy rate'), emptyText: '100 (64 MiB/s)',
+	    regex: /^(?:[1-9]\d?|1[0-4]\d|150)$/, regexText: '1 - 150' },
     ],
 
     policies: [
@@ -1231,6 +1234,8 @@ Ext.define('PVE.san.ArrayEdit', {
 			name: f.name,
 			fieldLabel: f.label,
 			emptyText: f.emptyText,
+			regex: f.regex,
+			regexText: f.regexText,
 			value: rec[f.name] || '',
 			hidden: true,
 			allowBlank: true,
