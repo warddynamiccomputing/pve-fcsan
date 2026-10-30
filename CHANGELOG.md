@@ -4,6 +4,16 @@ The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
 ## Unreleased
+- Hardening: `fc-discard` uses the LVM plugin's own background discard
+  (`on-volume-remove=discard=1`) where it exists, so large disks are
+  discarded outside the 60 s storage lock.
+- `fcsanvol` disks release their LUN on a node when the VM stops or
+  migrates away (`fc-keep-luns` keeps them); the GUI can add an
+  `fcsanvol` storage (Arrays, Per-disk storage).
+- Containers can be restored from a snapshot copy, in place or into a new
+  ID, like VMs.
+- Snapshot copies and DR imports are seen by the other nodes only after
+  `vgimportclone`, so they never see duplicate PVs.
 - Experimental: replication and disaster recovery. Replicate an array
   datastore to a partner array as one consistent group (`pvesan dr enable`,
   Pure FlashArray protection group targets with a replication schedule and
