@@ -1,6 +1,6 @@
 # pve-fcsan: How It Works
 
-Version 1.6.0
+Version 1.6.1
 
 ## Goals and the stack mapping
 
