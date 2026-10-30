@@ -303,14 +303,15 @@ pvesan provision fs01 gold01 --pool Pool0 --size 2048 --thin 1 --label "Gold 01"
 | NetApp E-Series | `netapp-eseries` | 8443 | Storage admin | `--system-id` (default `1`) | Host group | Pool / DDP | Thick volumes only; names up to 30 characters |
 | Hitachi VSP | `hitachi-vsp` | 443 (embedded) or your Configuration Manager port | Storage Administrator (Provisioning) | `--target-ports` (required, e.g. `CL1-A,CL2-A`); `--system-id` | One host group per target port (host mode LINUX/IRIX) | DP pool | LU path on every target port; WWID known after mapping |
 | Fujitsu ETERNUS DX S5 / AF S3 | `fujitsu-eternus` | 5665 (enable the RESTful API and open the port in the firewall settings) | User with the Admin or StorageAdmin role | — | One FC host per HBA port (`<node>_<n>`) | Thin provisioning pool (TPP) | Firmware V11L40 or later; host affinity enabled on the CA ports; the cluster's hosts must not share a LUN group with other hosts |
+| HPE Primera / Alletra 9000 / 3PAR StoreServ | `hpe-3par` | 443 (Primera, Alletra 9000); 8080 on 3PAR StoreServ (3PAR OS 3.x) | User with the edit role; WSAPI started (`startwsapi`) | — | Host set (hosts with persona 2, Generic-ALUA); volumes exported to the host set (`set:<name>`) with one LUN | CPG | Thin by default; thick (full) only on 3PAR StoreServ; volume and host names up to 31 characters, the host set up to 27 |
 
-**Array snapshots** (P13 to P15) work with `pure`, `infinidat`, `dell-powerstore`, `netapp-ontap` and `ibm-sv`. `dell-powermax`, `netapp-eseries`, `hitachi-vsp` and `fujitsu-eternus` report them as not supported yet.
+**Array snapshots** (P13 to P15) work with `pure`, `infinidat`, `dell-powerstore`, `netapp-ontap`, `ibm-sv` and `hpe-3par`. `dell-powermax`, `netapp-eseries`, `hitachi-vsp` and `fujitsu-eternus` report them as not supported yet.
 
 **First use with a new array type:** before your first production datastore, provision and delete a 10 GiB test datastore. Every driver's calls were checked against the vendor's own SDK or tooling, but real-array results are still being collected. If a step fails, the task log shows the array's own error code; please report it.
 
 ### P13. Array snapshots of a datastore
 
-Array snapshots are taken by the array in seconds and cost no host I/O. They work for array-linked datastores on **Pure FlashArray**, **INFINIDAT InfiniBox**, **Dell PowerStore**, **NetApp ONTAP** and **IBM Spectrum Virtualize**; the other drivers report "not supported yet". A datastore on several array volumes is snapshotted at one point in time: Pure uses a protection group `pvesan-<first volume>`, InfiniBox a group snapshot, PowerStore a write-order consistent volume group `pvesan-<first volume>`, IBM a FlashCopy consistency group. On ONTAP only single-LUN datastores can be snapshotted yet (one FlexVol per LUN; several would need a consistency group).
+Array snapshots are taken by the array in seconds and cost no host I/O. They work for array-linked datastores on **Pure FlashArray**, **INFINIDAT InfiniBox**, **Dell PowerStore**, **NetApp ONTAP**, **IBM Spectrum Virtualize** and **HPE Primera / Alletra 9000 / 3PAR**; the other drivers report "not supported yet". A datastore on several array volumes is snapshotted at one point in time: Pure uses a protection group `pvesan-<first volume>`, InfiniBox a group snapshot, PowerStore a write-order consistent volume group `pvesan-<first volume>`, IBM a FlashCopy consistency group, HPE a snapshot of the volume set `pvesan-<first volume>`. On ONTAP only single-LUN datastores can be snapshotted yet (one FlexVol per LUN; several would need a consistency group).
 
 Snapshots are **crash-consistent**: running VMs are not paused, so their disks look as if the power had been cut at that moment. For application consistency, shut the VM down or quiesce the application first.
 
@@ -322,7 +323,7 @@ pvesan snapshot list gold01
 pvesan snapshot delete gold01 before-upgrade
 ```
 
-Names use letters, digits and `-` and start with a letter. On the array the snapshot is named `<volume>.<name>` (Pure: `<volume>.<name>` or `<protection group>.<name>.<volume>`; ONTAP: a snapshot `<name>` of the LUN's FlexVol; IBM: a thin FlashCopy target volume `pvs_<volume id>_<name>`). On Pure a deleted snapshot stays recoverable on the array until it is eradicated (24 h by default).
+Names use letters, digits and `-` and start with a letter. On the array the snapshot is named `<volume>.<name>` (Pure: `<volume>.<name>` or `<protection group>.<name>.<volume>`; ONTAP: a snapshot `<name>` of the LUN's FlexVol; IBM: a thin FlashCopy target volume `pvs_<volume id>_<name>`; HPE: a virtual copy `<volume>.<time in hex>` that carries the pvesan name in its comment, because 3PAR names are limited to 31 characters). On Pure a deleted snapshot stays recoverable on the array until it is eradicated (24 h by default).
 
 **Schedules.** `pvesan snapshot schedule gold01 --snapshot-interval 4 --snapshot-keep 12` takes a snapshot every 4 hours and keeps the newest 12 scheduled ones. Scheduled snapshots are named `auto-<date>-<time>`; manual snapshots and mounted snapshots are never removed by the schedule. `pvesan-snapshot.timer` runs on every node every 15 minutes, and a claim under the cluster-wide pvesan lock makes sure exactly one node takes each snapshot. `pvesan snapshot schedule-show gold01` shows the last run and its error, if any; remove a schedule with `--delete snapshot-interval`.
 
@@ -537,6 +538,7 @@ Every node checks that each LUN of each enabled datastore it should see is prese
 | NetApp E-Series | 30 | — |
 | Hitachi VSP (`OPEN-`) | 10 | — |
 | Fujitsu ETERNUS DX | 10 | — |
+| HPE Primera / Alletra 9000 / 3PAR (`3PARdata VV`) | 18 | — |
 
 The built-in values are from multipath-tools' hardware table and change between versions; `multipath -t` shows the ones in force on a node. Set or change the value per LUN in **Devices → Properties → No path retry** or with `pvesan device set <wwid> --no-path-retry 12` (`--delete no-path-retry` returns to the built-in value); it applies on every node.
 

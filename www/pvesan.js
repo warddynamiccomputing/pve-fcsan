@@ -108,6 +108,14 @@ Ext.define('PVE.san.Utils', {
 	    roleHint: gettext('Needs controller firmware V11L40 or later with the RESTful API enabled and port 5665 open in the array firewall settings. Use a user with the Admin or StorageAdmin role. pvesan registers each node HBA port as an FC host and connects every volume to all of them; enable host affinity on the CA ports zoned to the cluster. Pools are thin provisioning pools.'),
 	    certHint: gettext('ETERNUS Web GUI: the RESTful API uses the Web GUI SSL certificate.'),
 	},
+	'hpe-3par': {
+	    name: 'HPE Primera / Alletra 9000 / 3PAR (WSAPI)',
+	    port: 443,
+	    username: true,
+	    secretLabel: gettext('Password'),
+	    roleHint: gettext('Use an array user with the edit role; the Web Services API must be started (startwsapi). Primera and Alletra 9000 serve it on port 443, 3PAR StoreServ on 8080. Pools are CPGs; the cluster is one host set (hosts with persona 2, Generic-ALUA) and every volume is exported to the host set. Names are at most 31 characters.'),
+	    certHint: gettext('HPE: "showcert" in the array CLI, or the certificate settings in SSMC.'),
+	},
     },
 
     optionFields: [
