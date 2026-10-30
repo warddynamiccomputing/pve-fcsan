@@ -20,6 +20,7 @@ use PVE::SAN::Provision;
 use PVE::SAN::Snapshot;
 use PVE::SAN::DR;
 use PVE::SAN::Inventory;
+use PVE::SAN::ISCSI;
 use PVE::SAN::Monitor;
 use PVE::SAN::Multipath;
 use PVE::SAN::Ops;
@@ -81,7 +82,7 @@ $register->({
     parameters => { additionalProperties => 0, properties => { node => $node_opt } },
     returns => { type => 'array', items => { type => 'object', properties => { name => { type => 'string' } } } },
     code => sub {
-        return [ map { { name => $_ } } qw(adapters array-probe arrays cleanup-paths datastores devices dr-import dr-run paths policies reclaim-run remote-ports rescan rescan-all snapshot-run sync) ];
+        return [ map { { name => $_ } } qw(adapters array-probe arrays cleanup-paths datastores devices dr-import dr-run iscsi iscsi-login iscsi-restore paths policies reclaim-run remote-ports rescan rescan-all snapshot-run sync) ];
     },
 });
 
@@ -290,6 +291,71 @@ $register->({
     parameters => { additionalProperties => 0, properties => { node => $node_opt } },
     returns => { type => 'object', properties => {} },
     code => sub { return PVE::SAN::Ops::sync(); },
+});
+
+my $portal_opt = {
+    description => "iSCSI target portal: IP address or DNS name, optionally with ':port' (default 3260).",
+    type => 'string',
+    pattern => '[\[\]0-9A-Za-z.:-]{1,261}',
+};
+my $target_opt = {
+    description => "Target IQN (default: every target the portal offers).",
+    type => 'string',
+    pattern => '(?:iqn|eui)\.[0-9A-Za-z.:-]{1,219}',
+    optional => 1,
+};
+
+$register->({
+    name => 'iscsi',
+    path => 'iscsi',
+    method => 'GET',
+    description => "This node's iSCSI initiator name, sessions and the target portals pvesan logs in to.",
+    permissions => { check => $PERM_AUDIT },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => {
+        type => 'object',
+        properties => {
+            initiator => { type => 'string', optional => 1, description => 'Initiator IQN (/etc/iscsi/initiatorname.iscsi).' },
+            installed => { type => 'boolean' },
+            sessions => { type => 'array', items => { type => 'object', properties => {} } },
+            portals => { type => 'array', items => { type => 'object', properties => {} } },
+        },
+    },
+    code => sub { return PVE::SAN::ISCSI::status(); },
+});
+
+$register->({
+    name => 'iscsi_login',
+    path => 'iscsi-login',
+    method => 'POST',
+    description => "Discover the targets on an iSCSI portal and log in to them on this node (idempotent, node.startup=automatic). The portal is recorded so every node logs in to it at boot.",
+    permissions => { check => $PERM_NODE },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            portal => $portal_opt,
+            target => $target_opt,
+            array => { type => 'string', pattern => '[a-z][a-z0-9_-]{0,31}', optional => 1,
+                description => "Array the portal belongs to (recorded with it)." },
+        },
+    },
+    returns => { type => 'object', properties => {} },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::ISCSI::login(portal => $param->{portal}, target => $param->{target}, array => $param->{array});
+    },
+});
+
+$register->({
+    name => 'iscsi_restore',
+    path => 'iscsi-restore',
+    method => 'POST',
+    description => "Log in to every recorded iSCSI portal this node has no session to (run at boot by pvesan-sync.service).",
+    permissions => { check => $PERM_NODE },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub { return PVE::SAN::ISCSI::restore(); },
 });
 
 $register->({
@@ -899,7 +965,9 @@ my $array_conn_props = {
     'target-ports' => { type => 'string', optional => 1, pattern => '[A-Za-z0-9-]+(?:,[A-Za-z0-9-]+)*',
         description => "Hitachi VSP: array FC ports zoned to the cluster, e.g. CL1-A,CL2-A (required)." },
     'auto-register' => { type => 'boolean', optional => 1,
-        description => "Register new cluster nodes' FC ports on this array automatically (default 1)." },
+        description => "Register new cluster nodes' ports on this array automatically (default 1)." },
+    protocol => { type => 'string', enum => ['fc', 'iscsi', 'both'], optional => 1,
+        description => "Node ports registered on the array: FC WWPNs (fc, default), the iSCSI initiator name (iscsi) or both. iSCSI registration logs every node in to the array's target portals." },
 };
 
 $register->({
@@ -1057,7 +1125,7 @@ $register->({
     name => 'array_register',
     path => 'arrays/{array}/register-cluster',
     method => 'POST',
-    description => "Create or update host objects for every node's FC ports and put them in the cluster's host cluster.",
+    description => "Create or update host objects for every node's FC ports and/or iSCSI initiator name (array setting 'protocol') and put them in the cluster's host cluster. For iSCSI, every node then logs in to the array's target portals.",
     permissions => { check => $PERM_CLUSTER },
     parameters => { additionalProperties => 0, properties => { node => $node_opt, array => $array_opt } },
     returns => { type => 'string' },
@@ -1065,6 +1133,30 @@ $register->({
         my ($param) = @_;
         return $worker->('pvesanregister', $param->{array}, sub {
             PVE::SAN::Provision::register_cluster(array => $param->{array});
+        });
+    },
+});
+
+$register->({
+    name => 'array_iscsi_login',
+    path => 'arrays/{array}/iscsi-login',
+    method => 'POST',
+    description => "Log every online node in to the array's iSCSI target portals (from the array, or the given portals) and record them for boot.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            array => $array_opt,
+            portals => { type => 'string', optional => 1, pattern => '[\[\]0-9A-Za-z.:-]+(?:[,; ]+[\[\]0-9A-Za-z.:-]+)*',
+                description => "Portals to use instead of the ones the array reports (comma separated, address[:port])." },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesaniscsi', $param->{array}, sub {
+            PVE::SAN::Provision::iscsi_login(array => $param->{array}, portals => $param->{portals});
         });
     },
 });

@@ -69,7 +69,7 @@ Ext.define('PVE.san.Utils', {
 	    port: 8443,
 	    username: true,
 	    secretLabel: gettext('Password'),
-	    roleHint: gettext('Address = Unisphere for PowerMax. User needs the StorageAdmin role on the array. Create a port group of the array FC ports zoned to the cluster first; pvesan creates the host group, storage group <cluster>_SG and masking view <cluster>_MV.'),
+	    roleHint: gettext('Address = Unisphere for PowerMax. User needs the StorageAdmin role on the array. Create a port group of the array FC ports zoned to the cluster (or of its iSCSI ports) first; pvesan creates the host group, storage group <cluster>_SG and masking view <cluster>_MV.'),
 	    certHint: gettext('Unisphere: Settings > Certificate Management.'),
 	    fields: { 'system-id': true, 'portgroup': true, 'srp': false, 'slo': false },
 	},
@@ -78,7 +78,7 @@ Ext.define('PVE.san.Utils', {
 	    port: 443,
 	    username: true,
 	    secretLabel: gettext('Password'),
-	    roleHint: gettext('Use a cluster or SVM admin account with the REST API (http) application. Each datastore gets its own FlexVol with one LUN; pools are aggregates; the cluster is one FCP igroup.'),
+	    roleHint: gettext('Use a cluster or SVM admin account with the REST API (http) application. Each datastore gets its own FlexVol with one LUN; pools are aggregates; the cluster is one igroup (FCP, iSCSI or mixed, by protocol).'),
 	    certHint: gettext('ONTAP: "security certificate show" on the cluster management LIF.'),
 	    fields: { 'svm': true },
 	},
@@ -96,12 +96,13 @@ Ext.define('PVE.san.Utils', {
 	    port: 443,
 	    username: true,
 	    secretLabel: gettext('Password'),
-	    roleHint: gettext('Use a storage user with the Storage Administrator (Provisioning) role. Hitachi host groups belong to one port: list every array FC port zoned to the cluster; pvesan creates a host group and LU path on each.'),
+	    roleHint: gettext('Use a storage user with the Storage Administrator (Provisioning) role. Hitachi host groups belong to one port: list every array FC port zoned to the cluster (or iSCSI port); pvesan creates a host group and LU path on each.'),
 	    certHint: gettext('Configuration Manager / SVP: server certificate settings.'),
 	    fields: { 'target-ports': true, 'system-id': false },
 	},
 	'fujitsu-eternus': {
 	    name: 'Fujitsu ETERNUS DX S5 / AF S3 (RESTful API)',
+	    noIscsi: true,
 	    port: 5665,
 	    username: true,
 	    secretLabel: gettext('Password'),
@@ -115,6 +116,22 @@ Ext.define('PVE.san.Utils', {
 	    secretLabel: gettext('Password'),
 	    roleHint: gettext('Use a Unisphere user with the Storage Administrator role. Unity has no host groups: pvesan creates one host per node with its FC initiators and gives every LUN access from all of them. Zone the nodes first so the array sees their initiators. Copies of snapshots are thin clones.'),
 	    certHint: gettext('Unisphere: the management certificate shown by your browser for the Unisphere address.'),
+	},
+	'hpe-nimble': {
+	    name: 'HPE Alletra 5000/6000 (Nimble)',
+	    port: 5392,
+	    username: true,
+	    secretLabel: gettext('Password'),
+	    roleHint: gettext('Use a NimOS user with the Power User or Administrator role (REST API on port 5392). The cluster is one FC initiator group holding every node WWPN; thin volumes have reserve 0, thick ones reserve 100%. Datastores on several volumes are snapshotted through a volume collection.'),
+	    certHint: gettext('NimOS GUI: the management certificate under Administration > Security.'),
+	},
+	'hpe-3par': {
+	    name: 'HPE Primera / Alletra 9000 / 3PAR (WSAPI)',
+	    port: 443,
+	    username: true,
+	    secretLabel: gettext('Password'),
+	    roleHint: gettext('Use an array user with the edit role; the Web Services API must be started (startwsapi). Primera and Alletra 9000 serve it on port 443, 3PAR StoreServ on 8080. Pools are CPGs; the cluster is one host set (hosts with persona 2, Generic-ALUA) and every volume is exported to the host set. Names are at most 31 characters.'),
+	    certHint: gettext('HPE: "showcert" in the array CLI, or the certificate settings in SSMC.'),
 	},
     },
 
@@ -1189,6 +1206,17 @@ Ext.define('PVE.san.ArrayEdit', {
 		{ xtype: 'textfield', name: 'hostcluster', fieldLabel: gettext('Host cluster'),
 		    value: me.isCreate ? '' : rec.hostcluster, allowBlank: true,
 		    emptyText: gettext('Proxmox cluster name') },
+		{
+		    xtype: 'proxmoxKVComboBox',
+		    name: 'protocol',
+		    fieldLabel: gettext('Protocol'),
+		    value: rec.protocol || 'fc',
+		    comboItems: [
+			['fc', gettext('Fibre Channel (node WWPNs)')],
+			['iscsi', gettext('iSCSI (node initiator names)')],
+			['both', gettext('FC and iSCSI')],
+		    ],
+		},
 		{ xtype: 'textfield', name: 'description', fieldLabel: gettext('Description'),
 		    value: rec.description || '', allowBlank: true },
 	    ],
@@ -1240,6 +1268,12 @@ Ext.define('PVE.san.ArrayEdit', {
 	if (setPort) {
 	    form.findField('port').setValue(t.port);
 	}
+	// drivers without verified iSCSI calls register FC ports only
+	let protocol = form.findField('protocol');
+	protocol.setDisabled(!!t.noIscsi);
+	if (t.noIscsi) {
+	    protocol.setValue('fc');
+	}
 	let fields = t.fields || {};
 	PVE.san.Utils.optionFields.forEach(function(f) {
 	    let field = form.findField(f.name);
@@ -1267,7 +1301,7 @@ Ext.define('PVE.san.ArrayStatus', {
 
     initComponent: function() {
 	let me = this;
-	let store = Ext.create('Ext.data.Store', { fields: ['node', 'registered', 'host', 'hostcluster', 'missing', 'wwpns'] });
+	let store = Ext.create('Ext.data.Store', { fields: ['node', 'registered', 'host', 'hostcluster', 'missing', 'wwpns', 'iqns'] });
 	let header = Ext.create('Ext.Component', { padding: 8, html: gettext('Loading...') });
 
 	let load = function() {
@@ -1277,7 +1311,9 @@ Ext.define('PVE.san.ArrayStatus', {
 		waitMsgTarget: me,
 		success: function(response) {
 		    let d = response.result.data;
-		    header.setHtml(Ext.htmlEncode(`${d.product || ''} ${d.system || ''}, code level ${d.code_level || '?'}`)
+		    me.protocol = d.protocol || 'fc';
+		    me.down('#iscsiLogin').setDisabled(me.protocol === 'fc');
+		    header.setHtml(Ext.htmlEncode(`${d.product || ''} ${d.system || ''}, code level ${d.code_level || '?'}, protocol ${me.protocol}`)
 			+ '<br>' + Ext.String.format(gettext("Host cluster '{0}': {1}"), Ext.htmlEncode(d.hostcluster),
 			    d.hostcluster_exists ? gettext('present') : gettext('missing')));
 		    store.loadData(d.nodes);
@@ -1308,9 +1344,64 @@ Ext.define('PVE.san.ArrayStatus', {
 		    done: load,
 		}),
 	    },
+	    {
+		text: gettext('iSCSI login'),
+		itemId: 'iscsiLogin',
+		disabled: true,
+		tooltip: gettext("Log every node in to the array's iSCSI target portals"),
+		handler: () => PVE.san.Utils.runTask({
+		    url: `/nodes/${me.nodename}/san/arrays/${me.arrayId}/iscsi-login`,
+		    done: load,
+		}),
+	    },
 	];
 	me.callParent();
 	load();
+    },
+});
+
+// Storage type fcsanvol: one array volume per VM disk (experimental)
+Ext.define('PVE.san.VolStorageAdd', {
+    extend: 'Proxmox.window.Edit',
+
+    subject: gettext('Per-disk array storage (fcsanvol)'),
+    isCreate: true,
+    method: 'POST',
+    url: '/storage',
+    width: 520,
+
+    initComponent: function() {
+	let me = this;
+	let pools = Ext.create('Ext.data.Store', { fields: ['name', 'free'] });
+	Proxmox.Utils.API2Request({
+	    url: `/nodes/${me.nodename}/san/arrays/${me.arrayId}/pools`,
+	    method: 'GET',
+	    success: response => pools.loadData(response.result.data),
+	    failure: response => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
+	});
+	me.items = [{
+	    xtype: 'inputpanel',
+	    onGetValues: function(values) {
+		values.type = 'fcsanvol';
+		values['fc-array'] = me.arrayId;
+		values.content = 'images';
+		return PVE.san.Utils.joinValues(values);
+	    },
+	    items: [
+		{ xtype: 'displayfield', fieldLabel: gettext('Array'), value: Ext.htmlEncode(me.arrayId) },
+		{ xtype: 'textfield', name: 'storage', fieldLabel: 'ID', vtype: 'StorageId', allowBlank: false },
+		{ xtype: 'combobox', name: 'fc-pool', fieldLabel: gettext('Pool'), store: pools, queryMode: 'local',
+		    valueField: 'name', displayField: 'name', editable: false, allowBlank: false },
+		{ xtype: 'proxmoxintegerfield', name: 'fc-max-luns', fieldLabel: gettext('Max. disks'), minValue: 1,
+		    maxValue: 16383, emptyText: '255' },
+		{ xtype: 'proxmoxcheckbox', name: 'fc-keep-luns', fieldLabel: gettext('Keep LUNs on nodes'), uncheckedValue: 0 },
+		{ xtype: 'pveNodeSelector', name: 'nodes', fieldLabel: gettext('Nodes'), multiSelect: true,
+		    autoSelect: false, emptyText: gettext('All') + ' (' + gettext('No restrictions') + ')' },
+		{ xtype: 'displayfield', userCls: 'pmx-hint',
+		    value: gettext('Experimental. Every VM disk on this storage becomes its own volume on the array; snapshots, clones, templates and resize are array operations. Raw disks only. Each disk is a LUN mapped to every node, so mind the array\'s and HBAs\' LUN limits.') },
+	    ],
+	}];
+	me.callParent();
     },
 });
 
@@ -1472,6 +1563,7 @@ Ext.define('PVE.san.ArrayGrid', {
 			    { header: gettext('Host'), dataIndex: 'host', width: 160 },
 			    { header: gettext('Host cluster'), dataIndex: 'hostcluster', width: 130 },
 			    { header: 'WWPNs', dataIndex: 'wwpns', flex: 1 },
+			    { header: 'IQNs', dataIndex: 'iqns', flex: 1 },
 			    { header: gettext('Removed node'), dataIndex: 'stale', width: 110, renderer: Proxmox.Utils.format_boolean },
 			],
 			tbar: [{
@@ -1496,6 +1588,12 @@ Ext.define('PVE.san.ArrayGrid', {
 	    {
 		xtype: 'proxmoxButton', text: gettext('Provision datastore'), iconCls: 'fa fa-magic', selModel: sm, disabled: true,
 		handler: () => Ext.create('PVE.san.Provision', {
+		    nodename: me.nodename, arrayId: rec().array, autoShow: true, listeners: after,
+		}),
+	    },
+	    {
+		xtype: 'proxmoxButton', text: gettext('Per-disk storage'), selModel: sm, disabled: true,
+		handler: () => Ext.create('PVE.san.VolStorageAdd', {
 		    nodename: me.nodename, arrayId: rec().array, autoShow: true, listeners: after,
 		}),
 	    },

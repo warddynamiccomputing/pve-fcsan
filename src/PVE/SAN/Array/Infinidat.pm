@@ -45,10 +45,11 @@ my %PATH = (
     hosts => '/hosts',
     clusters => '/clusters',
     cluster => '/clusters/%s',                # GET ?fields=luns
-    host_ports => '/hosts/%s/ports',          # POST { type => 'fc', address }
+    host_ports => '/hosts/%s/ports',          # POST { type => 'fc' or 'iscsi', address }
     cluster_hosts => '/clusters/%s/hosts',    # POST { id => host_id }
     cluster_luns => '/clusters/%s/luns',      # POST { volume_id }
     cluster_lun => '/clusters/%s/luns/lun/%s', # DELETE
+    network_spaces => '/network/spaces',      # iSCSI portals
 );
 
 sub description { return 'INFINIDAT InfiniBox'; }
@@ -170,12 +171,15 @@ sub hosts {
     for my $c (@{$self->host_clusters()}) { $in{$_} = $c->{name} for @{$c->{host_ids}}; }
     return [ map {
         my $h = $_;
+        my @ports = @{$h->{ports} // []};
         {
             id => $h->{id},
             name => $h->{name},
             hostcluster => $in{$h->{id}},
             wwpns => [ sort grep { defined } map { PVE::SAN::Array::Base::norm_wwpn($_->{address}) }
-                grep { uc($_->{type} // '') eq 'FC' } @{$h->{ports} // []} ],
+                grep { uc($_->{type} // '') eq 'FC' } @ports ],
+            iqns => [ sort grep { defined } map { PVE::SAN::Array::Base::norm_iqn($_->{address}) }
+                grep { lc($_->{type} // '') eq 'iscsi' } @ports ],
         }
     } @{$self->list($PATH{hosts})} ];
 }
@@ -191,24 +195,52 @@ sub create_hostcluster {
 }
 
 sub create_host {
-    my ($self, $name, $wwpns) = @_;
+    my ($self, $name, $wwpns, $iqns) = @_;
     my ($h) = $self->call('POST', $PATH{hosts}, undef, { name => $name });
-    my $host = { id => $h->{id}, name => $name, hostcluster => undef, wwpns => [] };
-    $self->add_host_ports($host, $wwpns);
+    my $host = { id => $h->{id}, name => $name, hostcluster => undef, wwpns => [], iqns => [] };
+    $self->add_host_ports($host, $wwpns, $iqns);
     $host->{wwpns} = [@$wwpns];
+    $host->{iqns} = [@{$iqns // []}];
     return $host;
 }
 
+# translators_and_types.py: a port is {type: "fc" | "iscsi", address}
 sub add_host_ports {
-    my ($self, $host, $wwpns) = @_;
+    my ($self, $host, $wwpns, $iqns) = @_;
     for my $w (@$wwpns) {
         $self->call('POST', sprintf($PATH{host_ports}, $host->{id}), undef, { type => 'fc', address => wwpn_colon($w) });
+    }
+    for my $q (@{$iqns // []}) {
+        $self->call('POST', sprintf($PATH{host_ports}, $host->{id}), undef, { type => 'iscsi', address => $q });
     }
 }
 
 sub add_to_hostcluster {
     my ($self, $hcname, $host) = @_;
     $self->call('POST', sprintf($PATH{cluster_hosts}, $self->cluster_id($hcname)), undef, { id => $host->{id} });
+}
+
+# --- iSCSI targets ---
+#
+# InfiniSDK network_space.py (network/spaces: service, ips, properties) and
+# OpenStack Cinder's infinidat.py (_get_iscsi_portals): every enabled
+# address of a network space with service ISCSI_SERVICE, on the space's
+# properties.iscsi_tcp_port, with target name properties.iscsi_iqn.
+
+sub supports_iscsi { return 1; }
+
+sub target_portals {
+    my ($self) = @_;
+    my @res;
+    for my $ns (grep { ($_->{service} // '') eq 'ISCSI_SERVICE' } @{$self->list($PATH{network_spaces})}) {
+        my $prop = ref($ns->{properties}) eq 'HASH' ? $ns->{properties} : {};
+        for my $ip (@{$ns->{ips} // []}) {
+            next if !$ip->{ip_address} || (defined($ip->{enabled}) && !$ip->{enabled});
+            push @res, { address => $ip->{ip_address}, port => ($prop->{iscsi_tcp_port} // 3260) + 0,
+                iqn => PVE::SAN::Array::Base::norm_iqn($prop->{iscsi_iqn}) };
+        }
+    }
+    return \@res;
 }
 
 # --- monitoring and lifecycle ---

@@ -14,6 +14,7 @@ my @modules = qw(
     PVE::SAN::LVM
     PVE::SAN::Config
     PVE::SAN::Inventory
+    PVE::SAN::ISCSI
     PVE::SAN::Ops
     PVE::SAN::Cluster
     PVE::SAN::Datastore
@@ -30,6 +31,8 @@ my @modules = qw(
     PVE::SAN::Array::Hitachi
     PVE::SAN::Array::Eternus
     PVE::SAN::Array::Unity
+    PVE::SAN::Array::Nimble
+    PVE::SAN::Array::HPE3PAR
     PVE::SAN::Provision
     PVE::SAN::Snapshot
     PVE::SAN::DR

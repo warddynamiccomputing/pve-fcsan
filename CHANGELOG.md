@@ -4,6 +4,41 @@ The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
 ## Unreleased
+- iSCSI provisioning: an array setting `protocol` (`fc`, `iscsi` or `both`;
+  API, `pvesan array add/set --protocol`, the array dialog) chooses whether
+  the nodes' FC WWPNs, their iSCSI initiator names
+  (`/etc/iscsi/initiatorname.iscsi`) or both are registered on the array.
+  Registering an iSCSI array logs every node in to the array's target
+  portals (`sendtargets` discovery, `node.startup=automatic`, idempotent),
+  so provisioning works end to end on iSCSI.
+- iSCSI host registration and target portals for Pure FlashArray, IBM
+  Spectrum Virtualize, Dell PowerStore, INFINIDAT InfiniBox, NetApp ONTAP
+  (igroup protocol `iscsi` or `mixed`), NetApp E-Series, Hitachi VSP (iSCSI
+  target ports) and Dell PowerMax (iSCSI port group). Fujitsu ETERNUS
+  reports iSCSI host registration as not supported yet.
+- Node-local iSCSI steps: `pvesan iscsi status`, `pvesan iscsi login
+  <portal>`, `pvesan array iscsi-login <array>` for all nodes. Logged-in
+  portals are recorded in the cluster config and restored at boot by
+  `pvesan-sync.service` (`pvesan iscsi restore`), also on nodes that join
+  later. Array status and hosts list show IQNs.
+- New array driver: HPE Primera, Alletra 9000 and 3PAR StoreServ (`hpe-3par`)
+  through the Web Services API (WSAPI). The cluster is a host set of hosts
+  with persona 2 (Generic-ALUA), each volume is exported to the host set
+  with one LUN, and pools are CPGs. Array snapshots are virtual copies;
+  datastores on several volumes are snapshotted through a volume set,
+  copies are online physical copies and restore promotes the virtual copy.
+  Requests checked against HPE's python-3parclient and OpenStack Cinder's
+  3PAR driver.
+- Hardening: `fc-discard` uses the LVM plugin's own background discard
+  (`on-volume-remove=discard=1`) where it exists, so large disks are
+  discarded outside the 60 s storage lock.
+- `fcsanvol` disks release their LUN on a node when the VM stops or
+  migrates away (`fc-keep-luns` keeps them); the GUI can add an
+  `fcsanvol` storage (Arrays, Per-disk storage).
+- Containers can be restored from a snapshot copy, in place or into a new
+  ID, like VMs.
+- Snapshot copies and DR imports are seen by the other nodes only after
+  `vgimportclone`, so they never see duplicate PVs.
 - Experimental: replication and disaster recovery. Replicate an array
   datastore to a partner array as one consistent group (`pvesan dr enable`,
   Pure FlashArray protection group targets with a replication schedule and
@@ -41,6 +76,11 @@ the readable summary.
   Array snapshots: LUN snapshots, copies as thin clones, restore; datastores
   on several LUNs are snapshotted through a consistency group (rollback
   only, Unity cannot thin-clone a group member).
+- New array driver: HPE Alletra 5000 / 6000 and Nimble Storage (`hpe-nimble`),
+  using the NimOS REST API on port 5392. The cluster is one FC initiator
+  group; volumes are presented through access control records. Array
+  snapshots, copies (clones) and restores; datastores on several volumes are
+  snapshotted through a volume collection and its snapshot collections.
 
 ## 1.5.0
 - Array snapshots of datastores (Pure FlashArray, INFINIDAT InfiniBox, Dell

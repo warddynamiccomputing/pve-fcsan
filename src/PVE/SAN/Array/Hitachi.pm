@@ -18,11 +18,17 @@ package PVE::SAN::Array::Hitachi;
 #   host group POST host-groups {portId, hostGroupName, hostMode}
 #   WWN        POST host-wwns {hostWwn, portId, hostGroupNumber}
 #   LU path    POST luns {portId, hostGroupNumber, ldevId}; DELETE luns/<port>,<hg>,<lun>
+#   iSCSI      GET ports/<id> {portType ISCSI, ipv4Address, tcpPort}; on an
+#              iSCSI port the host group is an iSCSI target (its iscsiName)
+#              and holds initiators: POST host-iscsis {iscsiName, portId,
+#              hostGroupNumber} (hbsd_rest_iscsi.py)
 #
 # Mapping model: Hitachi host groups belong to one array port. For every
 # configured target port the cluster gets a host group named after the
-# Proxmox cluster (host mode LINUX/IRIX) holding every node's WWPNs, and
-# each LDEV gets an LU path on each of those host groups.
+# Proxmox cluster (host mode LINUX/IRIX) holding every node's WWPNs (FC
+# ports) or initiator names (iSCSI ports), and each LDEV gets an LU path on
+# each of those host groups whose port type the array setting 'protocol'
+# includes.
 
 use strict;
 use warnings;
@@ -156,35 +162,83 @@ sub host_group {
 }
 
 sub ensure_hostcluster {
-    my ($self, $hcname, $node_wwpns, $log) = @_;
+    my ($self, $hcname, $node_ports, $log) = @_;
     $log //= sub { print "$_[0]\n" };
 
     die "invalid host group name '$hcname'\n" if !$self->valid_hostcluster_name($hcname);
-    my %want;
-    for my $node (sort keys %$node_wwpns) {
-        my @w = grep { defined } map { PVE::SAN::Array::Base::norm_wwpn($_) } @{$node_wwpns->{$node}};
-        die "node '$node' has no FC ports\n" if !@w;
-        $want{$_} = $node for @w;
+    my (%wwn, %iqn); # port name => node
+    my $sets = $self->node_port_sets($node_ports);
+    for my $node (sort keys %$sets) {
+        $wwn{$_} = $node for @{$sets->{$node}->[0]};
+        $iqn{$_} = $node for @{$sets->{$node}->[1]};
     }
-    my %result = map { $_ => { host => "host group $hcname", created => 0, added_ports => [], joined => 0 } } keys %$node_wwpns;
+    my %result = map { $_ => { host => "host group $hcname", created => 0, added_ports => [], joined => 0 } } keys %$sets;
 
+    my $used = 0;
     for my $port (@{$self->ports}) {
+        my $iscsi = $self->port_is_iscsi($port);
+        my ($want, $what) = $iscsi ? (\%iqn, 'iSCSI name') : (\%wwn, 'WWN');
+        if (!%$want) {
+            $log->("skipping " . ($iscsi ? 'iSCSI' : 'FC') . " port $port: no node ports of that kind");
+            next;
+        }
+        $used++;
         my $g = $self->host_group($port, $hcname);
         if (!$g) {
             $log->("creating host group '$hcname' on port $port (host mode LINUX/IRIX)");
             $self->call('POST', '/host-groups', undef, { portId => $port, hostGroupName => $hcname, hostMode => 'LINUX/IRIX' });
             $g = $self->host_group($port, $hcname) // die "Hitachi: host group '$hcname' on $port not found after creation\n";
         }
-        my %have = map { (PVE::SAN::Array::Base::norm_wwpn($_->{hostWwn}) // '') => 1 }
-            @{$self->data('/host-wwns', { portId => $port, hostGroupNumber => $g->{hostGroupNumber} })};
-        for my $w (sort grep { !$have{$_} } keys %want) {
-            $log->("registering WWN $w ($want{$w}) in $port host group '$hcname'");
-            $self->call('POST', '/host-wwns', undef,
-                { hostWwn => lc($w), portId => $port, hostGroupNumber => $g->{hostGroupNumber} + 0 });
-            push @{$result{$want{$w}}->{added_ports}}, "$port:$w";
+        my $q = { portId => $port, hostGroupNumber => $g->{hostGroupNumber} };
+        my %have = $iscsi
+            ? map { ((PVE::SAN::Array::Base::norm_iqn($_->{iscsiName}) // '') => 1) } @{$self->data('/host-iscsis', $q)}
+            : map { ((PVE::SAN::Array::Base::norm_wwpn($_->{hostWwn}) // '') => 1) } @{$self->data('/host-wwns', $q)};
+        for my $w (sort grep { !$have{$_} } keys %$want) {
+            $log->("registering $what $w ($want->{$w}) in $port host group '$hcname'");
+            if ($iscsi) {
+                $self->call('POST', '/host-iscsis', undef,
+                    { iscsiName => $w, portId => $port, hostGroupNumber => $g->{hostGroupNumber} + 0 });
+            } else {
+                $self->call('POST', '/host-wwns', undef,
+                    { hostWwn => lc($w), portId => $port, hostGroupNumber => $g->{hostGroupNumber} + 0 });
+            }
+            push @{$result{$want->{$w}}->{added_ports}}, "$port:$w";
         }
     }
+    die "Hitachi: none of the target ports (" . join(',', @{$self->ports}) . ") matches the nodes' "
+        . (%iqn ? (%wwn ? 'FC or iSCSI' : 'iSCSI') : 'FC') . " ports\n" if !$used;
     return \%result;
+}
+
+# GET ports/<id>: portType FIBRE, FCoE or ISCSI; ipv4Address and tcpPort
+# for iSCSI (Cinder hbsd_rest_iscsi.py, hbsd_rest_fc.py).
+sub port_info {
+    my ($self, $port) = @_;
+    return $self->{port_info}->{$port} //= ($self->call('GET', "/ports/$port") // {});
+}
+
+sub port_is_iscsi {
+    my ($self, $port) = @_;
+    return 0 if $self->protocols->[0] eq 'fc' && @{$self->protocols} == 1; # FC only: every port is FC
+    return uc($self->port_info($port)->{portType} // '') eq 'ISCSI' ? 1 : 0;
+}
+
+sub supports_iscsi { return 1; }
+
+# Each iSCSI target port's address; the target is the cluster's host group
+# on that port (its iscsiName).
+sub target_portals {
+    my ($self) = @_;
+    my $hc = $self->{hostcluster} // 'pve';
+    my @res;
+    for my $port (grep { $self->port_is_iscsi($_) } @{$self->ports}) {
+        my $info = $self->port_info($port);
+        next if !$info->{ipv4Address};
+        my $g = $self->host_group($port, $hc);
+        push @res, { address => $info->{ipv4Address}, port => ($info->{tcpPort} // 3260) + 0,
+            iqn => $g ? PVE::SAN::Array::Base::norm_iqn($g->{iscsiName}) : undef };
+    }
+    return \@res;
 }
 
 # --- LDEVs (id = LDEV number) ---
@@ -236,7 +290,8 @@ sub create_volume {
 
 sub map_to_hostcluster {
     my ($self, $id, $hcname) = @_;
-    for my $port (@{$self->ports}) {
+    my %use = map { ($_ => 1) } @{$self->protocols};
+    for my $port (grep { $use{$self->port_is_iscsi($_) ? 'iscsi' : 'fc'} } @{$self->ports}) {
         my $g = $self->host_group($port, $hcname) // die "Hitachi: host group '$hcname' missing on $port\n";
         $self->call('POST', '/luns', undef, { portId => $port, hostGroupNumber => $g->{hostGroupNumber} + 0, ldevId => $id + 0 });
     }

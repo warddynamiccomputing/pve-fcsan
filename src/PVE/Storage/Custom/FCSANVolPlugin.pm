@@ -49,11 +49,16 @@ sub properties {
             maxLength => 65,
         },
         'fc-max-luns' => {
-            description => "Most disk volumes this storage may hold. Every disk is a LUN on every node, and arrays and HBAs limit LUNs per host.",
+            description => "Most disk volumes this storage may hold. Every disk is a LUN mapped to every node, and arrays and HBAs limit LUNs per host.",
             type => 'integer',
             minimum => 1,
             maximum => 16383,
             default => 255,
+        },
+        'fc-keep-luns' => {
+            description => "Keep a disk's LUN on a node after its VM stops or leaves (by default its paths are removed and scanned back in on the next start).",
+            type => 'boolean',
+            default => 0,
         },
     };
 }
@@ -63,6 +68,7 @@ sub options {
         'fc-array' => { fixed => 1 },
         'fc-pool' => {},
         'fc-max-luns' => { optional => 1 },
+        'fc-keep-luns' => { optional => 1 },
         nodes => { optional => 1 },
         disable => { optional => 1 },
         content => { optional => 1 },
@@ -132,9 +138,12 @@ sub activate_volume {
     return 1;
 }
 
-# The LUN stays visible; the next activation on this node is instant.
+# The LUN's map and paths leave this node; the array mapping stays, so the
+# next activation scans it back in. 'fc-keep-luns' keeps them instead.
 sub deactivate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
+    return 1 if $snapname || $scfg->{'fc-keep-luns'};
+    PVE::SAN::Volume::deactivate($storeid, $scfg, $volname);
     return 1;
 }
 

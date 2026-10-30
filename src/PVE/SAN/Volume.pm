@@ -206,6 +206,19 @@ sub activate {
     die "multipath map for $storeid:$volname is not named '" . alias_for($storeid, $volname) . "' on this node\n";
 }
 
+# Release the disk's LUN on this node once nothing uses it (VM stopped or
+# migrated away), so a node does not keep paths to every disk it ever ran.
+# The array mapping stays; the next activation scans the LUN back in. A map
+# that is still open (another task on this node uses the disk) is kept.
+sub deactivate {
+    my ($storeid, $scfg, $volname) = @_;
+    my ($wwid) = eval { record($storeid, $volname) };
+    return if !$wwid;
+    require PVE::SAN::Ops;
+    eval { PVE::SAN::Ops::detach_device($wwid) };
+    warn "$storeid:$volname: LUN kept on this node - $@" if $@;
+}
+
 sub list {
     my ($storeid, $scfg, $vmid, $vollist) = @_;
     my ($drv) = driver($storeid, $scfg);

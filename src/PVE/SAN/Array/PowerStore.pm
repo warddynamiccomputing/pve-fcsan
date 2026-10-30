@@ -11,6 +11,10 @@ package PVE::SAN::Array::PowerStore;
 #   map / unmap   POST /volume/<id>/attach | detach {host_group_id}
 #   host          POST /host {name, os_type, initiators}; PATCH {add_initiators}
 #                 fields: host_group_id, host_initiators
+#                 initiators: [{port_name, port_type: FC | iSCSI}]
+#   iSCSI portals GET /ip_pool_address?purposes=cs.{Storage_Iscsi_Target}
+#                 &select=address,ip_port(target_iqn) (Cinder's PowerStore
+#                 driver, dell_emc/powerstore/client.py and adapter.py)
 #   host group    POST /host_group {name, host_ids}; PATCH {add_host_ids}
 #   snapshots     POST /volume/<id>/snapshot {name}; list GET /volume with
 #                 protection_data->>source_id=eq.<id> and type=eq.Snapshot
@@ -94,19 +98,25 @@ sub hosts {
     my %hg = map { $_->{id} => $_->{name} } @{$self->host_clusters()};
     return [ map {
         my $h = $_;
+        my @init = @{$h->{host_initiators} // []};
         {
             id => $h->{id},
             name => $h->{name},
             hostcluster => $h->{host_group_id} ? $hg{$h->{host_group_id}} : undef,
             wwpns => [ sort grep { defined } map { PVE::SAN::Array::Base::norm_wwpn($_->{port_name}) }
-                grep { uc($_->{port_type} // 'FC') eq 'FC' } @{$h->{host_initiators} // []} ],
+                grep { uc($_->{port_type} // 'FC') eq 'FC' } @init ],
+            iqns => [ sort grep { defined } map { PVE::SAN::Array::Base::norm_iqn($_->{port_name}) }
+                grep { lc($_->{port_type} // '') eq 'iscsi' } @init ],
         }
     } @{$self->call('GET', '/host', { select => 'id,name,host_group_id,host_initiators' }) // []} ];
 }
 
 sub initiators {
-    my ($wwpns) = @_;
-    return [ map { { port_name => PVE::SAN::Array::Base::colon_wwpn($_), port_type => 'FC' } } @$wwpns ];
+    my ($wwpns, $iqns) = @_;
+    return [
+        (map { { port_name => PVE::SAN::Array::Base::colon_wwpn($_), port_type => 'FC' } } @$wwpns),
+        (map { { port_name => $_, port_type => 'iSCSI' } } @{$iqns // []}),
+    ];
 }
 
 # PowerStore creates a host group together with its first member.
@@ -116,14 +126,26 @@ sub create_hostcluster {
 }
 
 sub create_host {
-    my ($self, $name, $wwpns) = @_;
-    my $r = $self->call('POST', '/host', undef, { name => $name, os_type => 'Linux', initiators => initiators($wwpns) });
-    return { id => $r->{id}, name => $name, hostcluster => undef, wwpns => [@$wwpns] };
+    my ($self, $name, $wwpns, $iqns) = @_;
+    my $r = $self->call('POST', '/host', undef, { name => $name, os_type => 'Linux', initiators => initiators($wwpns, $iqns) });
+    return { id => $r->{id}, name => $name, hostcluster => undef, wwpns => [@$wwpns], iqns => [@{$iqns // []}] };
 }
 
 sub add_host_ports {
-    my ($self, $host, $wwpns) = @_;
-    $self->call('PATCH', "/host/$host->{id}", undef, { add_initiators => initiators($wwpns) });
+    my ($self, $host, $wwpns, $iqns) = @_;
+    $self->call('PATCH', "/host/$host->{id}", undef, { add_initiators => initiators($wwpns, $iqns) });
+}
+
+sub supports_iscsi { return 1; }
+
+sub target_portals {
+    my ($self) = @_;
+    my $r = $self->call('GET', '/ip_pool_address',
+        { purposes => 'cs.{Storage_Iscsi_Target}', select => 'address,ip_port(target_iqn)' }) // [];
+    return [ map {
+        { address => $_->{address}, port => 3260,
+          iqn => PVE::SAN::Array::Base::norm_iqn(ref($_->{ip_port}) eq 'HASH' ? $_->{ip_port}->{target_iqn} : undef) }
+    } grep { $_->{address} } @$r ];
 }
 
 sub group_id {

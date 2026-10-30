@@ -110,7 +110,7 @@ sub due_jobs {
     return \@due;
 }
 
-my $DISK_KEY = qr/^(?:ide|sata|scsi|virtio|efidisk|tpmstate|unused)\d+$/;
+my $DISK_KEY = qr/^(?:(?:ide|sata|scsi|virtio|efidisk|tpmstate|unused|mp)\d+|rootfs)$/; # VMs and containers
 
 # The current configuration of a guest config file (snapshot sections cut).
 sub main_section {
@@ -129,7 +129,7 @@ sub vm_disks {
     my ($main, $storeid) = @_;
     my @res;
     for my $line (split(/\n/, $main)) {
-        my ($key, $val) = $line =~ /^([a-z]+\d+):\s*(\S.*)$/ or next;
+        my ($key, $val) = $line =~ /^([a-z]+\d*):\s*(\S.*)$/ or next;
         next if $key !~ $DISK_KEY;
         my ($vol, $opts) = $val =~ /^\Q$storeid\E:([^,]+)(.*)$/ or next;
         next if $val =~ /(?:^|,)media=cdrom(?:,|$)/;
@@ -360,9 +360,12 @@ sub mount_copy {
         require PVE::SAN::Provision;
         require PVE::SAN::Datastore;
         my @wwids = map { $_->{wwid} } @clones;
-        print "rescanning all nodes for the copy's LUN(s)\n";
-        PVE::SAN::Provision::wait_visible($nodes, $_, $p{timeout}) for @wwids;
-        my $devs = PVE::SAN::Datastore::register_devices($nodes, $copy, \@wwids, 0);
+        # Only this node sees the clones until vgimportclone has given them new
+        # PV and VG UUIDs; the other nodes never see two PVs with one identity.
+        my $here = [ PVE::SAN::Cluster::local_node() ];
+        print "rescanning this node for the copy's LUN(s)\n";
+        PVE::SAN::Provision::wait_visible($here, $_, $p{timeout}) for @wwids;
+        my $devs = PVE::SAN::Datastore::register_devices($here, $copy, \@wwids, 0);
 
         print "importing the volume group as '$vg' (new PV and VG UUIDs)\n";
         run_cmd(['vgimportclone', '--basevgname', $vg,
@@ -381,6 +384,8 @@ sub mount_copy {
             content => 'images',
             'fc-wwids' => join(',', @wwids),
         });
+        print "rescanning the other nodes for the copy's LUN(s)\n";
+        PVE::SAN::Provision::wait_visible($nodes, $_, $p{timeout}) for @wwids;
         PVE::SAN::Cluster::on_nodes($nodes, 'refreshing LVM device lists', 'POST', 'sync');
         1;
     };
@@ -452,7 +457,7 @@ sub restore_vm {
 
     my ($ref) = grep { $_->{vmid} == $vmid } @{PVE::SAN::Cluster::guest_refs($src)};
     die "VM $vmid has no disks on '$src'\n" if !$ref;
-    die "only QEMU VMs can be restored yet (CT $vmid)\n" if $ref->{type} ne 'qemu';
+    my $kind = $ref->{type} eq 'lxc' ? 'CT' : 'VM';
     my $raw = PVE::Tools::file_get_contents($ref->{file});
     my $main = main_section($raw);
 
@@ -469,11 +474,11 @@ sub restore_vm {
 
     my $check_stopped = sub {
         my $s = PVE::SAN::Cluster::guest_status()->{$vmid} // {};
-        die "VM $vmid is running on $s->{node} - shut it down first\n" if ($s->{status} // '') eq 'running';
+        die "$kind $vmid is running on $s->{node} - shut it down first\n" if ($s->{status} // '') eq 'running';
     };
     if ($mode eq 'replace') {
         $check_stopped->();
-        die "VM $vmid has snapshots; delete them first, or restore into a new VM\n" if has_snapshots($raw);
+        die "$kind $vmid has snapshots; delete them first, or restore into a new ID\n" if has_snapshots($raw);
     }
 
     my $storecfg = PVE::Storage::config();
@@ -533,13 +538,13 @@ sub restore_vm {
         my ($text, $notes) = new_vm_config($main, $src, \%map);
         print "note: $_\n" for @$notes;
         my $node = PVE::SAN::Cluster::local_node();
-        my $file = "/etc/pve/nodes/$node/qemu-server/$newid.conf";
+        my $file = "/etc/pve/nodes/$node/" . ($ref->{type} eq 'lxc' ? 'lxc' : 'qemu-server') . "/$newid.conf";
         die "VM ID $newid is already in use\n" if -e $file || PVE::SAN::Cluster::guest_status()->{$newid};
         PVE::Tools::file_set_contents($file, $text);
-        print "VM $vmid restored from snapshot '$ds->{snapshot}' as new VM $newid on $node\n";
+        print "$kind $vmid restored from snapshot '$ds->{snapshot}' as new $kind $newid on $node\n";
         return $newid;
     }
-    print "disks of VM $vmid restored from snapshot '$ds->{snapshot}'\n";
+    print "disks of $kind $vmid restored from snapshot '$ds->{snapshot}'\n";
     return $vmid;
 }
 
