@@ -501,9 +501,10 @@ pvesan can zone the array to the cluster for you. It reads each node's HBA ports
 **Before you start**
 
 1. Cable each node and the array to both fabrics and make sure the ports are logged in (the switch's `nsshow` / `show fcns database`).
-2. Brocade: Fabric OS 8.2.1 or later with the REST interface on (`mgmtapp --show`), and a user with the zoneadmin or admin role. Add one switch per fabric (or per virtual fabric, with `--vf-id`).
-3. Cisco MDS: `feature nxapi`, and a user with the network-admin role. Add one entry per VSAN (`--vsan`). Basic and enhanced zoning both work; in enhanced mode pvesan commits the session itself.
-4. The array must report its FC ports: `ibm-sv`, `infinidat`, `pure` and `hpe-3par` do. For the other types give them with `--targets`.
+2. Brocade: Fabric OS 8.2.1 or later with the REST interface on (`mgmtapp --show`), and a user with the zoneadmin or admin role. Add one switch per fabric (or per virtual fabric, with `--vf-id`). pvesan talks HTTPS, so the switch needs an HTTPS certificate (`seccertmgmt show -all`); after a factory reset create one if none is listed (`seccertmgmt generate -cert https -type rsa`, or install your CA-signed one).
+3. A fabric with no zoning yet (a new or factory-reset switch) has no active zone set: give one with `--zoneset <name>` and pvesan creates it with the first zones and activates it. Once a zone set is active, only zoned ports can talk to each other.
+4. Cisco MDS: `feature nxapi`, and a user with the network-admin role. Add one entry per VSAN (`--vsan`). Basic and enhanced zoning both work; in enhanced mode pvesan commits the session itself.
+5. The array must report its FC ports: `ibm-sv`, `infinidat`, `pure` and `hpe-3par` do. For the other types give them with `--targets`.
 
 **Add the switches**
 
