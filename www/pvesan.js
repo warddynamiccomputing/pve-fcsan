@@ -1146,6 +1146,14 @@ Ext.define('PVE.san.ArrayEdit', {
 	me.url = `/nodes/${me.nodename}/san/arrays` + (me.isCreate ? '' : `/${me.arrayId}`);
 	let rec = me.record || {};
 
+	// a new array: offer to zone it once the window has closed
+	me.apiCallDone = function(success) {
+	    if (success && me.isCreate) {
+		let id = me.down('form').getForm().findField('array').getValue();
+		Ext.defer(() => PVE.san.Utils.offerZoning(me.nodename, id), 200);
+	    }
+	};
+
 	let probe = function() {
 	    let form = me.down('form').getForm();
 	    let address = form.findField('address').getValue();
@@ -1558,6 +1566,10 @@ Ext.define('PVE.san.ArrayGrid', {
 		}),
 	    },
 	    {
+		xtype: 'proxmoxButton', text: gettext('Auto-zone'), iconCls: 'fa fa-random', selModel: sm, disabled: true,
+		handler: () => Ext.create('PVE.san.ZoningPlan', { nodename: me.nodename, arrayId: rec().array, autoShow: true }),
+	    },
+	    {
 		xtype: 'proxmoxButton', text: gettext('Hosts'), selModel: sm, disabled: true,
 		handler: function() {
 		    let arrayId = rec().array;
@@ -1635,6 +1647,321 @@ Ext.define('PVE.san.ArrayGrid', {
 	me.callParent();
     },
 });
+
+// --- FC switches and automatic zoning ---
+
+Ext.define('PVE.san.FabricEdit', {
+    extend: 'Proxmox.window.Edit',
+
+    subject: gettext('FC switch'),
+    width: 520,
+
+    initComponent: function() {
+	let me = this;
+	me.isCreate = !me.fabricId;
+	me.method = me.isCreate ? 'POST' : 'PUT';
+	me.url = `/nodes/${me.nodename}/san/fabrics` + (me.isCreate ? '' : `/${me.fabricId}`);
+	let rec = me.record || {};
+
+	let probe = function() {
+	    let form = me.down('form').getForm();
+	    let address = form.findField('address').getValue();
+	    if (!address) {
+		Ext.Msg.alert(gettext('Error'), gettext('Enter the management address first.'));
+		return;
+	    }
+	    Proxmox.Utils.API2Request({
+		url: `/nodes/${me.nodename}/san/fabric-probe`,
+		method: 'POST',
+		params: { address, port: form.findField('port').getValue() || 443 },
+		waitMsgTarget: me,
+		success: function(response) {
+		    let c = response.result.data;
+		    Ext.Msg.confirm(gettext('Confirm switch certificate'),
+			`${gettext('Subject')}: ${Ext.htmlEncode(c.subject)}<br>${gettext('Issuer')}: ${Ext.htmlEncode(c.issuer)}<br><br>`
+			+ `SHA-256: <code>${Ext.htmlEncode(c.fingerprint)}</code><br><br>`
+			+ gettext('Compare this with the switch certificate (Brocade: "seccertmgmt show -all"; Cisco: "show crypto ca certificates") before trusting it.')
+			+ '<br><br>' + gettext('Trust it?'),
+			btn => btn === 'yes' && form.findField('fingerprint').setValue(c.fingerprint));
+		},
+		failure: response => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
+	    });
+	};
+
+	let applyType = function(type) {
+	    let form = me.down('form') && me.down('form').getForm();
+	    if (!form) {
+		return;
+	    }
+	    let vsan = form.findField('vsan');
+	    vsan.setHidden(type !== 'cisco');
+	    vsan.allowBlank = type !== 'cisco';
+	    form.findField('vf-id').setHidden(type !== 'brocade');
+	    me.down('#typeHint').setValue(type === 'cisco'
+		? gettext('Cisco MDS: NX-API must be on ("feature nxapi"). Add one entry per VSAN; the user needs the network-admin role (or a role allowed to configure zoning).')
+		: gettext('Brocade: Fabric OS 8.2.1 or later with the REST API (HTTPS). Use a user with the zoneadmin or admin role. Add one entry per fabric (or virtual fabric).'));
+	    form.isValid();
+	};
+
+	me.items = [{
+	    xtype: 'inputpanel',
+	    onGetValues: function(values) {
+		if (!me.isCreate) {
+		    delete values.fabric;
+		    delete values.type;
+		    if (!values.password) { delete values.password; }
+		    if (values.fingerprint === rec.fingerprint) { delete values.fingerprint; }
+		}
+		return PVE.san.Utils.joinValues(values);
+	    },
+	    column1: [
+		{ xtype: me.isCreate ? 'textfield' : 'displayfield', name: 'fabric', fieldLabel: 'ID',
+		    value: me.fabricId || '', regex: /^[a-z][a-z0-9_-]{0,31}$/, allowBlank: false, emptyText: 'fabric-a' },
+		{
+		    xtype: 'proxmoxKVComboBox',
+		    name: 'type',
+		    fieldLabel: gettext('Type'),
+		    value: rec.type || 'brocade',
+		    disabled: !me.isCreate,
+		    comboItems: [['brocade', 'Brocade (FOS REST)'], ['cisco', 'Cisco MDS (NX-API)']],
+		    listeners: { change: (f, v) => applyType(v) },
+		},
+		{ xtype: 'textfield', name: 'address', fieldLabel: gettext('Management address'), value: rec.address || '', allowBlank: false },
+		{ xtype: 'proxmoxintegerfield', name: 'port', fieldLabel: gettext('HTTPS port'), value: rec.port || 443, minValue: 1, maxValue: 65535 },
+		{ xtype: 'textfield', name: 'username', fieldLabel: gettext('User'), value: rec.username || '', allowBlank: !me.isCreate },
+		{ xtype: 'textfield', inputType: 'password', name: 'password', fieldLabel: gettext('Password'), allowBlank: !me.isCreate,
+		    emptyText: me.isCreate ? '' : gettext('unchanged') },
+	    ],
+	    column2: [
+		{ xtype: 'proxmoxintegerfield', name: 'vsan', fieldLabel: 'VSAN', value: rec.vsan, minValue: 1, maxValue: 4094, hidden: true },
+		{ xtype: 'proxmoxintegerfield', name: 'vf-id', fieldLabel: gettext('Virtual fabric ID'), value: rec['vf-id'], minValue: 1, maxValue: 255,
+		    emptyText: gettext('default') },
+		{ xtype: 'textfield', name: 'zoneset', fieldLabel: gettext('Zone set'), value: rec.zoneset || '',
+		    regex: /^[A-Za-z][A-Za-z0-9_]{0,63}$/, emptyText: gettext('the active one') },
+		{ xtype: 'textfield', name: 'description', fieldLabel: gettext('Description'), value: rec.description || '' },
+	    ],
+	    columnB: [
+		{
+		    xtype: 'fieldcontainer',
+		    fieldLabel: gettext('Certificate'),
+		    layout: 'hbox',
+		    items: [
+			{ xtype: 'textfield', name: 'fingerprint', flex: 1, readOnly: true, value: rec.fingerprint || '',
+			    allowBlank: false, emptyText: gettext('fetch and confirm the switch certificate') },
+			{ xtype: 'button', text: gettext('Fetch'), margin: '0 0 0 5', handler: probe },
+		    ],
+		},
+		{ xtype: 'displayfield', itemId: 'typeHint', userCls: 'pmx-hint', value: '' },
+	    ],
+	}];
+	me.callParent();
+	applyType(rec.type || 'brocade');
+    },
+});
+
+Ext.define('PVE.san.FabricGrid', {
+    extend: 'PVE.san.BaseGrid',
+    alias: 'widget.pveSanFabricGrid',
+
+    title: gettext('Fabrics'),
+    sanPath: 'fabrics',
+    stateId: 'grid-pvesan-fabrics',
+    sanSorters: 'fabric',
+
+    columns: [
+	{ header: 'ID', dataIndex: 'fabric', width: 110 },
+	{ header: gettext('Type'), dataIndex: 'type', width: 80 },
+	{ header: gettext('Address'), dataIndex: 'address', width: 140 },
+	{ header: 'VSAN / VF', width: 90, renderer: (v, m, r) => r.data.vsan || r.data['vf-id'] || '-' },
+	{ header: gettext('Zone set'), dataIndex: 'zoneset', width: 130, renderer: v => v || gettext('active') },
+	{ header: gettext('Switch'), dataIndex: 'system', flex: 1 },
+	{ header: gettext('Description'), dataIndex: 'description', flex: 1, hidden: true },
+    ],
+
+    initComponent: function() {
+	let me = this;
+	let sm = Ext.create('Ext.selection.RowModel', {});
+	me.selModel = sm;
+	let rec = () => sm.getSelection()[0].data;
+	let after = { destroy: () => me.reload() };
+
+	me.tbar = [
+	    {
+		text: gettext('Add'),
+		iconCls: 'fa fa-plus-circle',
+		handler: () => Ext.create('PVE.san.FabricEdit', { nodename: me.nodename, autoShow: true, listeners: after }),
+	    },
+	    {
+		xtype: 'proxmoxButton', text: gettext('Edit'), selModel: sm, disabled: true,
+		handler: () => Ext.create('PVE.san.FabricEdit', {
+		    nodename: me.nodename, fabricId: rec().fabric, record: rec(), autoShow: true, listeners: after,
+		}),
+	    },
+	    {
+		xtype: 'proxmoxButton', text: gettext('Logged-in ports'), selModel: sm, disabled: true,
+		handler: function() {
+		    let id = rec().fabric;
+		    let store = Ext.create('Ext.data.Store', { fields: ['wwpn', 'wwnn', 'role', 'owner', 'symbolic'] });
+		    let win = Ext.create('Ext.window.Window', {
+			title: Ext.String.format(gettext('Ports logged in to fabric {0}'), Ext.htmlEncode(id)),
+			modal: true, width: 820, height: 440, layout: 'fit',
+			items: [{
+			    xtype: 'grid', store,
+			    columns: [
+				{ header: 'WWPN', dataIndex: 'wwpn', width: 180 },
+				{ header: gettext('Role'), dataIndex: 'role', width: 80 },
+				{ header: gettext('Belongs to'), dataIndex: 'owner', width: 140 },
+				{ header: gettext('Symbolic name'), dataIndex: 'symbolic', flex: 1 },
+				{ header: 'WWNN', dataIndex: 'wwnn', width: 180, hidden: true },
+			    ],
+			}],
+		    });
+		    win.show();
+		    Proxmox.Utils.API2Request({
+			url: me.url(`fabrics/${id}/status`),
+			method: 'GET',
+			waitMsgTarget: win,
+			success: function(response) {
+			    let d = response.result.data;
+			    win.setTitle(Ext.htmlEncode(`${id}: ${d.model || ''} ${d.name || ''} ${d.version || ''}`));
+			    store.loadData(d.ports || []);
+			},
+			failure: response => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
+		    });
+		},
+	    },
+	    {
+		xtype: 'proxmoxButton', text: gettext('Remove'), selModel: sm, disabled: true,
+		confirmMsg: r => Ext.String.format(gettext('Remove switch {0} from pvesan? Nothing on the switch is changed.'),
+		    Ext.htmlEncode(r.data.fabric)),
+		handler: () => Proxmox.Utils.API2Request({
+		    url: me.url(`fabrics/${rec().fabric}`),
+		    method: 'DELETE',
+		    waitMsgTarget: me,
+		    success: () => me.reload(),
+		    failure: response => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
+		}),
+	    },
+	];
+	me.callParent();
+    },
+});
+
+// Shows the zoning plan for an array; Apply creates the zones and activates
+// the zone sets, then offers to register the cluster's hosts on the array.
+Ext.define('PVE.san.ZoningPlan', {
+    extend: 'Ext.window.Window',
+
+    modal: true,
+    width: 980,
+    height: 520,
+    layout: 'border',
+
+    initComponent: function() {
+	let me = this;
+	let base = `/nodes/${me.nodename}/san/arrays/${me.arrayId}`;
+	me.title = Ext.String.format(gettext('Automatic zoning: array {0} and the cluster'), Ext.htmlEncode(me.arrayId));
+	let store = Ext.create('Ext.data.Store', {
+	    fields: ['fabric', 'zoneset', 'action', 'node', 'initiator', 'zone', 'targets'],
+	    groupField: 'fabric',
+	});
+	let actionIcon = function(v) {
+	    let cls = v === 'exists' ? 'fa-check good' : 'fa-plus-circle';
+	    return `<i class="fa ${cls}"></i> ${Ext.htmlEncode(v === 'exists' ? gettext('already zoned') : v)}`;
+	};
+	let load = function() {
+	    Proxmox.Utils.API2Request({
+		url: `${base}/zoning-plan`,
+		method: 'GET',
+		waitMsgTarget: me,
+		success: function(response) {
+		    let d = response.result.data;
+		    store.loadData(d.rows || []);
+		    let notes = [];
+		    (d.fabrics || []).forEach(function(f) {
+			if (f.blocked) {
+			    notes.push(`<i class="fa fa-times critical"></i> ${Ext.htmlEncode(f.fabric)}: ${Ext.htmlEncode(f.blocked)}`);
+			}
+			(f.warnings || []).forEach(w => notes.push(`<i class="fa fa-exclamation-triangle warning"></i> ${Ext.htmlEncode(f.fabric)}: ${Ext.htmlEncode(w)}`));
+		    });
+		    (d.warnings || []).forEach(w => notes.push(`<i class="fa fa-exclamation-triangle warning"></i> ${Ext.htmlEncode(w)}`));
+		    let blocked = (d.fabrics || []).some(f => f.blocked && (f.zones || []).length);
+		    me.down('#summary').update(
+			Ext.String.format(gettext('Array ports: {0}'), Ext.htmlEncode(d.targets || '-')) + '<br>'
+			+ (d.changes ? Ext.String.format(gettext('{0} zone change(s). Each zone holds one node port and the array ports on the same fabric; the zone sets are activated afterwards.'), d.changes)
+			    : gettext('Nothing to do: every node port is already zoned to the array.'))
+			+ (notes.length ? '<br><br>' + notes.join('<br>') : ''));
+		    me.down('#apply').setDisabled(!d.changes || blocked);
+		},
+		failure: function(response) {
+		    me.down('#summary').update(`<i class="fa fa-times critical"></i> ${Ext.htmlEncode(response.htmlStatus)}`);
+		    me.down('#apply').setDisabled(true);
+		},
+	    });
+	};
+
+	me.items = [
+	    { region: 'north', itemId: 'summary', xtype: 'component', padding: 10, html: gettext('Reading the nodes, the array and the switches...') },
+	    {
+		region: 'center',
+		xtype: 'grid',
+		store,
+		features: [{ ftype: 'grouping', groupHeaderTpl: '{[gettext("Fabric")]} {name}' }],
+		columns: [
+		    { header: gettext('Action'), dataIndex: 'action', width: 140, renderer: actionIcon },
+		    { header: gettext('Zone set'), dataIndex: 'zoneset', width: 110 },
+		    { header: gettext('Node'), dataIndex: 'node', width: 100 },
+		    { header: gettext('Node port'), dataIndex: 'initiator', width: 170 },
+		    { header: gettext('Zone'), dataIndex: 'zone', flex: 1 },
+		    { header: gettext('Array ports'), dataIndex: 'targets', flex: 1 },
+		],
+	    },
+	];
+	me.buttons = [
+	    { text: gettext('Reload'), handler: load },
+	    {
+		text: gettext('Apply'),
+		itemId: 'apply',
+		disabled: true,
+		handler: () => Ext.Msg.confirm(gettext('Apply zoning'),
+		    gettext('Create these zones and activate the zone sets on the switches now?'),
+		    function(btn) {
+			if (btn !== 'yes') { return; }
+			PVE.san.Utils.runTask({
+			    url: `${base}/zone`,
+			    waitMsgTarget: me,
+			    done: function() {
+				load();
+				Ext.Msg.confirm(gettext('Register hosts'),
+				    Ext.String.format(gettext('Register the cluster\'s hosts on array {0} now?'), Ext.htmlEncode(me.arrayId)),
+				    b => b === 'yes' && PVE.san.Utils.runTask({ url: `${base}/register-cluster` }));
+			    },
+			});
+		    }),
+	    },
+	    { text: gettext('Close'), handler: () => me.close() },
+	];
+	me.callParent();
+	load();
+    },
+});
+
+// After an array is added: if switches are configured, offer to zone it.
+PVE.san.Utils.offerZoning = function(nodename, arrayId) {
+    Proxmox.Utils.API2Request({
+	url: `/nodes/${nodename}/san/fabrics`,
+	method: 'GET',
+	success: function(response) {
+	    if (!(response.result.data || []).length) {
+		return;
+	    }
+	    Ext.Msg.confirm(gettext('Zone the array'),
+		Ext.String.format(gettext('Zone array {0} to the cluster\'s nodes on the configured fabrics now? You will see the plan before anything changes.'),
+		    Ext.htmlEncode(arrayId)),
+		btn => btn === 'yes' && Ext.create('PVE.san.ZoningPlan', { nodename, arrayId, autoShow: true }));
+	},
+    });
+};
 
 // --- array snapshots ---
 
@@ -2094,6 +2421,7 @@ Ext.define('PVE.san.Panel', {
 	    { xtype: 'pveSanSnapshotGrid', nodename },
 	    { xtype: 'pveSanReplicationPanel', nodename },
 	    { xtype: 'pveSanArrayGrid', nodename },
+	    { xtype: 'pveSanFabricGrid', nodename },
 	    { xtype: 'pveSanDeviceGrid', nodename },
 	    { xtype: 'pveSanPathGrid', nodename },
 	    { xtype: 'pveSanAdapterGrid', nodename },

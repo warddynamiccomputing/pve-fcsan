@@ -33,6 +33,11 @@ my @modules = qw(
     PVE::SAN::Array::Unity
     PVE::SAN::Array::Nimble
     PVE::SAN::Array::HPE3PAR
+    PVE::SAN::Fabric
+    PVE::SAN::Fabric::Base
+    PVE::SAN::Fabric::Brocade
+    PVE::SAN::Fabric::Cisco
+    PVE::SAN::Zoning
     PVE::SAN::Provision
     PVE::SAN::Snapshot
     PVE::SAN::DR

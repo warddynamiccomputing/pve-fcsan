@@ -255,6 +255,22 @@ sub volume_space {
     } @$ids ];
 }
 
+# FC ports that are up, as OpenStack Cinder's infinidat.py
+# (_get_online_fc_ports) picks them: components/nodes, each node's fc_ports
+# with link_state UP and state OK.
+sub target_ports {
+    my ($self) = @_;
+    my @w;
+    for my $n (@{$self->list('/components/nodes', { fields => 'fc_ports' })}) {
+        for my $p (@{ref($n->{fc_ports}) eq 'ARRAY' ? $n->{fc_ports} : []}) {
+            next if lc($p->{link_state} // '') ne 'up' || uc($p->{state} // 'OK') ne 'OK';
+            my $x = PVE::SAN::Array::Base::norm_wwpn($p->{wwpn});
+            push @w, $x if defined($x);
+        }
+    }
+    return [ sort @w ];
+}
+
 sub remove_host {
     my ($self, $host, $hcname) = @_;
     if (($host->{hostcluster} // '') eq $hcname) {

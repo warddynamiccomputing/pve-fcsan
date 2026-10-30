@@ -73,6 +73,38 @@ my $print_iscsi = sub {
     printf("%-28s %-16s %s\n", $_->{portal}, $_->{array} // '-', $_->{target} // 'all') for @{$data->{portals} // []};
 };
 
+my $print_zoning_plan = sub {
+    my ($data, $schema, $options) = @_;
+    if (($options->{'output-format'} // 'text') ne 'text') {
+        PVE::CLIFormatter::print_api_result($data, $schema, undef, $options);
+        return;
+    }
+    printf("array %s, host cluster %s\narray ports: %s\n\n", $data->{array}, $data->{hostcluster}, $data->{targets} || '-');
+    for my $f (@{$data->{fabrics}}) {
+        printf("fabric %s (%s), zone set %s\n", $f->{fabric}, $f->{type}, $f->{zoneset} // '-');
+        print "  BLOCKED: $f->{blocked}\n" if $f->{blocked};
+        print "  warning: $_\n" for @{$f->{warnings}};
+        for my $r (grep { $_->{fabric} eq $f->{fabric} } @{$data->{rows}}) {
+            printf("  %-16s %-14s %-23s %s\n", $r->{action}, $r->{node}, $r->{initiator}, $r->{zone});
+        }
+        print "\n";
+    }
+    print "warning: $_\n" for @{$data->{warnings}};
+    print $data->{changes} ? "$data->{changes} zone change(s); 'pvesan array zone $data->{array}' applies them\n"
+        : "nothing to do: every node port is already zoned to the array\n";
+};
+
+my $print_fabric_status = sub {
+    my ($data, $schema, $options) = @_;
+    if (($options->{'output-format'} // 'text') ne 'text') {
+        PVE::CLIFormatter::print_api_result($data, $schema, undef, $options);
+        return;
+    }
+    printf("fabric %s: %s %s, version %s\n\n", $data->{fabric}, $data->{model} // '', $data->{name} // '', $data->{version} // '?');
+    printf("%-23s %-10s %-14s %s\n", 'WWPN', 'ROLE', 'OWNER', 'SYMBOLIC NAME');
+    printf("%-23s %-10s %-14s %s\n", $_->{wwpn}, $_->{role} || '-', $_->{owner} || '-', $_->{symbolic} // '') for @{$data->{ports}};
+};
+
 my $fmt = $PVE::RESTHandler::standard_output_options;
 my $api = 'PVE::API2::SAN';
 my $node = { node => $nodename };
@@ -147,8 +179,19 @@ our $cmddef = {
         'iscsi-login' => [ $api, 'array_iscsi_login', ['array'], $node, $task ],
         link => [ $api, 'array_link', ['array', 'storage'], $node, $print_obj, $fmt ],
         zoning => [ $api, 'array_zoning', ['array'], $node, $print_obj, $fmt ],
+        'zone-plan' => [ $api, 'array_zoning_plan', ['array'], $node, $print_zoning_plan, $fmt ],
+        zone => [ $api, 'array_zone', ['array'], $node, $task ],
         hosts => [ $api, 'array_hosts', ['array'], $node, $table->(qw(host hostcluster wwpns iqns stale)), $fmt ],
         'remove-host' => [ $api, 'array_remove_host', ['array', 'host'], $node, $task ],
+    },
+
+    fabric => {
+        list => [ $api, 'fabrics', [], $node, $table->(qw(fabric type address vsan vf-id zoneset system)), $fmt ],
+        probe => [ $api, 'fabric_probe', ['address'], $node, $print_obj, $fmt ],
+        add => [ $api, 'fabric_add', ['fabric'], $node, $print_obj, $fmt ],
+        set => [ $api, 'fabric_update', ['fabric'], $node ],
+        remove => [ $api, 'fabric_remove', ['fabric'], $node ],
+        status => [ $api, 'fabric_status', ['fabric'], $node, $print_fabric_status, $fmt ],
     },
 
     provision => [ $api, 'array_provision', ['array', 'storage'], $node, $task ],
@@ -202,7 +245,7 @@ our $cmddef = {
 sub param_mapping {
     my ($name) = @_;
     my $pw = PVE::CLIHandler::get_standard_mapping('pve-password');
-    my $mapping = { array_add => [$pw], array_update => [$pw] };
+    my $mapping = { array_add => [$pw], array_update => [$pw], fabric_add => [$pw], fabric_update => [$pw] };
     return $mapping->{$name};
 }
 

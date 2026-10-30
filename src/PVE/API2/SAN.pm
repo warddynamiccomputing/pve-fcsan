@@ -19,11 +19,13 @@ use PVE::SAN::Datastore;
 use PVE::SAN::Provision;
 use PVE::SAN::Snapshot;
 use PVE::SAN::DR;
+use PVE::SAN::Fabric;
 use PVE::SAN::Inventory;
 use PVE::SAN::ISCSI;
 use PVE::SAN::Monitor;
 use PVE::SAN::Multipath;
 use PVE::SAN::Ops;
+use PVE::SAN::Zoning;
 use PVE::SAN::Util qw(parse_wwid_list normalize_wwid);
 
 use base qw(PVE::RESTHandler);
@@ -1224,6 +1226,181 @@ $register->({
     code => sub {
         my ($param) = @_;
         return PVE::SAN::Monitor::zoning(array => $param->{array});
+    },
+});
+
+my $zoning_props = {
+    fabrics => { type => 'string', optional => 1, pattern => '[a-z][a-z0-9_-]{0,31}(?:,[a-z][a-z0-9_-]{0,31})*',
+        description => "Switches (fabrics) to zone on, comma separated (default: all configured)." },
+    targets => { type => 'string', optional => 1, maxLength => 4096,
+        description => "Array FC target WWPNs to zone to, instead of the ones the array reports (needed for array types that cannot list them yet)." },
+};
+
+$register->({
+    name => 'array_zoning_plan',
+    path => 'arrays/{array}/zoning-plan',
+    method => 'GET',
+    description => "Plan single-initiator zones between every node's FC ports and the array's FC ports on each configured fabric. Changes nothing.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, array => $array_opt, %$zoning_props } },
+    returns => { type => 'object', properties => {} },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Zoning::plan(array => $param->{array}, fabrics => $param->{fabrics}, targets => $param->{targets});
+    },
+});
+
+$register->({
+    name => 'array_zone',
+    path => 'arrays/{array}/zone',
+    method => 'POST',
+    description => "Create the planned zones on each fabric (see zoning-plan), add them to the fabric's zone set and activate it.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, array => $array_opt, %$zoning_props } },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        return $worker->('pvesanzone', $param->{array}, sub {
+            PVE::SAN::Zoning::apply(array => $param->{array}, fabrics => $param->{fabrics}, targets => $param->{targets});
+        });
+    },
+});
+
+# --- FC switches (fabrics) ---
+
+my $fabric_opt = {
+    description => "Fabric (switch) ID.",
+    type => 'string',
+    pattern => '[a-z][a-z0-9_-]{0,31}',
+};
+
+my $fabric_props = {
+    address => { type => 'string', format => 'address', description => "Switch management IP or DNS name." },
+    port => { type => 'integer', minimum => 1, maximum => 65535, optional => 1, description => "HTTPS port (default 443)." },
+    username => { type => 'string', maxLength => 64, description => "Switch user with zoning rights (Brocade: zoneadmin or admin role; Cisco: network-admin)." },
+    password => { type => 'string', maxLength => 512, description => "Switch password. Stored in /etc/pve/priv." },
+    fingerprint => { type => 'string', pattern => 'sha256\$[0-9a-fA-F]{64}',
+        description => "Pinned SHA-256 TLS certificate fingerprint (from fabric-probe)." },
+    vsan => { type => 'integer', minimum => 1, maximum => 4094, optional => 1, description => "Cisco MDS: VSAN to zone in (required)." },
+    'vf-id' => { type => 'integer', minimum => 1, maximum => 255, optional => 1, description => "Brocade: virtual fabric ID (default: the default fabric)." },
+    zoneset => { type => 'string', optional => 1, pattern => '[A-Za-z][A-Za-z0-9_]{0,63}',
+        description => "Zone set (Brocade: zoning configuration) the zones go in (default: the active one)." },
+    description => { type => 'string', optional => 1, maxLength => 256 },
+};
+
+$register->({
+    name => 'fabric_probe',
+    path => 'fabric-probe',
+    method => 'POST',
+    description => "Read a switch's TLS certificate fingerprint so it can be confirmed and pinned.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => { node => $node_opt, address => $fabric_props->{address}, port => $fabric_props->{port} },
+    },
+    returns => { type => 'object', properties => {
+        fingerprint => { type => 'string' }, subject => { type => 'string' }, issuer => { type => 'string' },
+    } },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Array::probe_certificate($param->{address}, $param->{port} // 443);
+    },
+});
+
+$register->({
+    name => 'fabrics',
+    path => 'fabrics',
+    method => 'GET',
+    description => "List configured FC switches (one per fabric or VSAN).",
+    permissions => { check => $PERM_AUDIT },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt } },
+    returns => {
+        type => 'array',
+        items => {
+            type => 'object',
+            properties => {
+                fabric => { type => 'string' },
+                type => { type => 'string' },
+                address => { type => 'string' },
+                system => { type => 'string', optional => 1 },
+            },
+        },
+    },
+    code => sub { return PVE::SAN::Fabric::list(); },
+});
+
+$register->({
+    name => 'fabric_add',
+    path => 'fabrics',
+    method => 'POST',
+    description => "Add an FC switch for automatic zoning. The connection and credentials are tested before saving.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            fabric => $fabric_opt,
+            type => { type => 'string', enum => PVE::SAN::Fabric::types(), description => "Switch type." },
+            %$fabric_props,
+        },
+    },
+    returns => { type => 'object', properties => {} },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Fabric::add(%$param);
+    },
+});
+
+$register->({
+    name => 'fabric_update',
+    path => 'fabrics/{fabric}',
+    method => 'PUT',
+    description => "Change a switch's settings or credentials.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => $node_opt,
+            fabric => $fabric_opt,
+            (map { $_ => { %{$fabric_props->{$_}}, optional => 1 } } keys %$fabric_props),
+            delete => { type => 'string', optional => 1, pattern => '[a-z][a-z0-9-]*(?:,[a-z][a-z0-9-]*)*',
+                description => "Settings to remove (description, vf-id, zoneset)." },
+        },
+    },
+    returns => { type => 'null' },
+    code => sub {
+        my ($param) = @_;
+        PVE::SAN::Fabric::update(%$param);
+        return undef;
+    },
+});
+
+$register->({
+    name => 'fabric_remove',
+    path => 'fabrics/{fabric}',
+    method => 'DELETE',
+    description => "Remove a switch from pvesan (nothing on the switch is changed).",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, fabric => $fabric_opt } },
+    returns => { type => 'null' },
+    code => sub {
+        my ($param) = @_;
+        PVE::SAN::Fabric::remove(fabric => $param->{fabric});
+        return undef;
+    },
+});
+
+$register->({
+    name => 'fabric_status',
+    path => 'fabrics/{fabric}/status',
+    method => 'GET',
+    description => "Switch info and every port logged in to the fabric, marked with the node or array it belongs to.",
+    permissions => { check => $PERM_CLUSTER },
+    parameters => { additionalProperties => 0, properties => { node => $node_opt, fabric => $fabric_opt } },
+    returns => { type => 'object', properties => {} },
+    code => sub {
+        my ($param) = @_;
+        return PVE::SAN::Fabric::status(fabric => $param->{fabric});
     },
 });
 

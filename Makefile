@@ -12,15 +12,17 @@ BASHCOMPDIR := $(DESTDIR)/usr/share/bash-completion/completions
 
 SAN_MODULES := $(wildcard src/PVE/SAN/*.pm)
 ARRAY_MODULES := $(wildcard src/PVE/SAN/Array/*.pm)
+FABRIC_MODULES := $(wildcard src/PVE/SAN/Fabric/*.pm)
 
 .PHONY: all install test check deb clean
 
 all:
 
 install:
-	install -d $(PERLDIR)/PVE/SAN/Array $(PERLDIR)/PVE/API2 $(PERLDIR)/PVE/CLI $(PERLDIR)/PVE/Storage/Custom
+	install -d $(PERLDIR)/PVE/SAN/Array $(PERLDIR)/PVE/SAN/Fabric $(PERLDIR)/PVE/API2 $(PERLDIR)/PVE/CLI $(PERLDIR)/PVE/Storage/Custom
 	install -m 0644 $(SAN_MODULES) $(PERLDIR)/PVE/SAN/
 	install -m 0644 $(ARRAY_MODULES) $(PERLDIR)/PVE/SAN/Array/
+	install -m 0644 $(FABRIC_MODULES) $(PERLDIR)/PVE/SAN/Fabric/
 	install -m 0644 src/PVE/API2/SAN.pm $(PERLDIR)/PVE/API2/
 	install -m 0644 src/PVE/CLI/pvesan.pm $(PERLDIR)/PVE/CLI/
 	install -m 0644 src/PVE/Storage/Custom/FCSANPlugin.pm src/PVE/Storage/Custom/FCSANVolPlugin.pm $(PERLDIR)/PVE/Storage/Custom/
