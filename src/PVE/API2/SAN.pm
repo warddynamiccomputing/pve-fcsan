@@ -964,6 +964,8 @@ my $array_conn_props = {
         description => "Dell PowerMax: service level for the cluster's storage group (default: none / Optimized)." },
     'target-ports' => { type => 'string', optional => 1, pattern => '[A-Za-z0-9-]+(?:,[A-Za-z0-9-]+)*',
         description => "Hitachi VSP: array FC ports zoned to the cluster, e.g. CL1-A,CL2-A (required)." },
+    'copy-rate' => { type => 'integer', minimum => 1, maximum => 150, optional => 1,
+        description => "IBM Spectrum Virtualize: FlashCopy background copy rate for snapshot copies and restores (default 100 = 64 MiB/s; each 10 more doubles it, 150 = 2 GiB/s)." },
     'auto-register' => { type => 'boolean', optional => 1,
         description => "Register new cluster nodes' ports on this array automatically (default 1)." },
     protocol => { type => 'string', enum => ['fc', 'iscsi', 'both'], optional => 1,

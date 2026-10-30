@@ -294,7 +294,7 @@ pvesan provision fs01 gold01 --pool Pool0 --size 2048 --thin 1 --label "Gold 01"
 
 | Array | `--type` | Port | Credentials | Extra settings | Cluster object pvesan creates | Pool | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| IBM FlashSystem / Spectrum Virtualize | `ibm-sv` | 7443 | User, Administrator role | — | Host cluster | Pool | Default path policy `alua` |
+| IBM FlashSystem / Spectrum Virtualize | `ibm-sv` | 7443 | User, Administrator role | `--copy-rate` (FlashCopy background copy rate for snapshot copies and restores, 1 to 150, default 100) | Host cluster | Pool | Default path policy `alua` |
 | Pure Storage FlashArray | `pure` | 443 | API token of a Storage Admin user (no username) | — | Host group | `default` | Always thin; deleted volumes recoverable until eradicated |
 | INFINIDAT InfiniBox | `infinidat` | 443 | User, Pool Admin or Admin | — | Cluster | Pool | Thin or thick |
 | Dell PowerStore | `dell-powerstore` | 443 | User, Storage Administrator | — | Host group | `default` | Always thin |
@@ -326,6 +326,8 @@ pvesan snapshot delete gold01 before-upgrade
 ```
 
 Names use letters, digits and `-` and start with a letter. On the array the snapshot is named `<volume>.<name>` (Pure: `<volume>.<name>` or `<protection group>.<name>.<volume>`; ONTAP: a snapshot `<name>` of the LUN's FlexVol; IBM: a thin FlashCopy target volume `pvs_<volume id>_<name>`; HPE: a virtual copy `<volume>.<time in hex>` that carries the pvesan name in its comment, because 3PAR names are limited to 31 characters). On Pure a deleted snapshot stays recoverable on the array until it is eradicated (24 h by default).
+
+On IBM a copy (P14) or restore (P15) is usable at once, but the array copies the data in the background, and the snapshot can't be deleted until that finishes. The speed is the array setting `copy-rate`: 100 (the default) is 64 MiB/s, each 10 more doubles it, and 150 is 2 GiB/s. A higher rate finishes sooner but puts more load on the array. Change it with `pvesan array set <array> --copy-rate 120`.
 
 **Schedules.** `pvesan snapshot schedule gold01 --snapshot-interval 4 --snapshot-keep 12` takes a snapshot every 4 hours and keeps the newest 12 scheduled ones. Scheduled snapshots are named `auto-<date>-<time>`; manual snapshots and mounted snapshots are never removed by the schedule. `pvesan-snapshot.timer` runs on every node every 15 minutes, and a claim under the cluster-wide pvesan lock makes sure exactly one node takes each snapshot. `pvesan snapshot schedule-show gold01` shows the last run and its error, if any; remove a schedule with `--delete snapshot-interval`.
 

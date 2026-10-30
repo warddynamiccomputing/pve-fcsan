@@ -36,6 +36,7 @@ our $OPTION_KEYS = {
     'srp' => 'srp',
     'slo' => 'slo',
     'target-ports' => 'target_ports',
+    'copy-rate' => 'copy_rate', # IBM FlashCopy background copy rate
     'protocol' => 'protocol', # fc, iscsi or both
     'auto-register' => 'auto_register', # not a driver setting: pvesan-monitor registers new nodes
 };
