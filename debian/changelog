@@ -1,3 +1,14 @@
+pve-fcsan (1.7.0) trixie; urgency=medium
+
+  * Automatic FC zoning on Brocade (FOS REST API) and Cisco MDS (NX-API)
+    fabrics: new pvesan fabric commands register one switch per fabric,
+    VSAN or virtual fabric; pvesan array zone-plan / zone create
+    single-initiator zones for the host cluster and activate the zone set.
+    Adding an array in the GUI offers to zone it; new Fabrics tab.
+  * IBM Spectrum Virtualize and InfiniBox report their FC target ports.
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Fri, 30 Oct 2026 22:00:00 +0000
+
 pve-fcsan (1.6.1) trixie; urgency=medium
 
   * IBM Spectrum Virtualize: snapshot copies and restores copy in the
