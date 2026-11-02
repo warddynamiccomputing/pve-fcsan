@@ -77,7 +77,8 @@ sub list_dir {
     my @entries = grep { !/^\./ } readdir($dh);
     closedir($dh);
     s/%3A/:/g for @entries;
-    return sort @entries;
+    @entries = sort @entries;
+    return @entries;
 }
 
 # "0x21000024ff3d5e10" -> "21:00:00:24:ff:3d:5e:10"; zero/absent -> undef

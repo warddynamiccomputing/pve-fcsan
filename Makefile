@@ -49,6 +49,7 @@ check: test
 lint:
 	shellcheck tools/*.sh debian/postinst debian/prerm debian/postrm
 	perlcritic --profile .perlcriticrc src bin
+	@! grep -nE "uses: *[^ ]+@" .github/workflows/*.yml | grep -vE "@[0-9a-f]{40}( |$$)" || { echo "actions must be pinned to a full commit SHA"; exit 1; }
 
 # exec bits get lost when the tree is copied from Windows or a zip
 deb:

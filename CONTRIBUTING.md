@@ -18,6 +18,7 @@ Open an issue with the "Array report / bug" template and include:
 
 ```bash
 make test        # unit tests; PVE modules are stubbed when not installed
+make lint        # shellcheck, perlcritic, actions pinned (needs shellcheck libperl-critic-perl)
 make deb         # Debian package (needs debhelper)
 ```
 
@@ -34,4 +35,4 @@ make deb         # Debian package (needs debhelper)
 
 ## Pull requests
 
-One topic per pull request, tests included, `make test` green.
+One topic per pull request, tests included, `make test` and `make lint` green.
