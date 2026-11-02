@@ -51,29 +51,35 @@ SKIP: {
 # A real TLS handshake: the server's certificate is signed by a CA the client
 # trusts, so only the pin can refuse it.
 SKIP: {
-    skip 'IO::Socket::SSL::Utils not installed', 3
+    skip 'IO::Socket::SSL::Utils not installed', 2
         if !eval { require IO::Socket::SSL; require IO::Socket::SSL::Utils; require Net::SSLeay; 1 };
-    skip 'no fork', 3 if $^O eq 'MSWin32';
+    skip 'no fork', 2 if $^O eq 'MSWin32';
     IO::Socket::SSL::Utils->import(qw(CERT_create));
     my ($ca, $cakey) = CERT_create(CA => 1, subject => { CN => 'test CA' });
     my ($cert, $key) = CERT_create(issuer => [ $ca, $cakey ], subject => { CN => 'array.test' }, purpose => 'server');
     my $right = 'sha256$' . lc(unpack('H*', Net::SSLeay::X509_digest($cert, Net::SSLeay::EVP_get_digestbyname('sha256'))));
 
-    my $srv = IO::Socket::SSL->new(Listen => 5, LocalAddr => '127.0.0.1', LocalPort => 0,
-        SSL_cert => $cert, SSL_key => $key, SSL_startHandshake => 0) or die "listen: $!";
+    # Plain TCP listener; the child does each server handshake itself. Every
+    # step has a timeout so a stalled handshake fails the test, never hangs it.
+    require IO::Socket::INET;
+    require POSIX;
+    my $srv = IO::Socket::INET->new(Listen => 5, LocalAddr => '127.0.0.1', LocalPort => 0, ReuseAddr => 1)
+        or die "listen: $!";
     my $port = $srv->sockport;
     my $pid = fork() // die "fork: $!";
     if (!$pid) {
-        for (1 .. 3) {
-            my $c = $srv->accept or next;
-            IO::Socket::SSL->start_SSL($c, SSL_server => 1, SSL_cert => $cert, SSL_key => $key);
+        alarm(60);
+        while (my $c = $srv->accept) {
+            IO::Socket::SSL->start_SSL($c, SSL_server => 1, SSL_cert => $cert, SSL_key => $key, Timeout => 10);
             close($c);
         }
-        exit(0);
+        POSIX::_exit(0); # no Test::More END block in the child
     }
+    close($srv);
     my $connect = sub {
         my ($opts) = @_;
-        my $s = IO::Socket::SSL->new(PeerHost => '127.0.0.1', PeerPort => $port, SSL_ca => [ $ca ], %$opts);
+        my $s = IO::Socket::SSL->new(PeerHost => '127.0.0.1', PeerPort => $port, SSL_ca => [ $ca ],
+            Timeout => 10, %$opts);
         close($s) if $s;
         return $s ? 1 : 0;
     };
@@ -81,8 +87,13 @@ SKIP: {
         SSL_verifycn_scheme => 'none' }), 1, 'pinned certificate: handshake succeeds');
     is($connect->({ SSL_verify_mode => 1, SSL_verify_callback => $B->can('pin_verifier')->($FP),
         SSL_verifycn_scheme => 'none' }), 0, 'CA-signed but not the pinned certificate: refused');
-    is($connect->({ SSL_verify_mode => 1, SSL_fingerprint => $FP, SSL_verifycn_scheme => 'none' }), 1,
-        'for reference: SSL_fingerprint alone lets the CA-signed certificate through');
+    # For reference only, not a test (it depends on the IO::Socket::SSL
+    # version): older versions let a CA-signed certificate through when only
+    # SSL_fingerprint is set, which is why pvesan checks the pin itself.
+    diag('IO::Socket::SSL ' . IO::Socket::SSL->VERSION . ': SSL_fingerprint alone '
+        . ($connect->({ SSL_verify_mode => 1, SSL_fingerprint => $FP, SSL_verifycn_scheme => 'none' })
+            ? 'accepts' : 'refuses') . ' a CA-signed certificate that is not pinned');
+    kill('TERM', $pid);
     waitpid($pid, 0);
 }
 

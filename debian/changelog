@@ -1,3 +1,15 @@
+pve-fcsan (1.8.0) trixie; urgency=medium
+
+  * GUI: new Datacenter > Storage > SAN / Fibre Channel entry with the
+    cluster-wide tabs (datastores, snapshots, disaster recovery, arrays,
+    fabrics) and all nodes at once: LUNs with each node's paths, and
+    paths, adapters, performance and health with a node column. Offline or
+    unreachable nodes are named above the table. Node > Disks keeps the
+    node's own tabs.
+  * GUI: path counts are rendered from numbers only.
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Mon, 02 Nov 2026 22:00:00 +0000
+
 pve-fcsan (1.7.1) trixie; urgency=high
 
   * Security: array and switch connections accept only the pinned

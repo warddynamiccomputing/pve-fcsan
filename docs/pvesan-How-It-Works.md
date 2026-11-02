@@ -1,6 +1,6 @@
 # pve-fcsan: How It Works
 
-Version 1.7.1
+Version 1.8.0
 
 ## Goals and the stack mapping
 
@@ -344,7 +344,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 
 **Layers.** `Util`, `Sysfs`, `Multipath` (parsing/rendering) and `LVM` (parsing) are pure Perl and read sysfs through `PVESAN_SYSFS_ROOT`, so a fixture tree replaces `/sys`. `Inventory`, `Ops`, `Config` and `Cluster` add Proxmox VE and command execution; `Datastore` and `Provision` compose them; `API2::SAN` exposes them; the CLI and GUI sit only on the API.
 
-**Tests** (`make test`, 1371 checks):
+**Tests** (`make test`, 1370 checks):
 
 | File | Covers |
 | --- | --- |
