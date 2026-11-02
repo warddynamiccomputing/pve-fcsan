@@ -1,3 +1,14 @@
+pve-fcsan (1.8.1) trixie; urgency=medium
+
+  * Releases now come with a SHA256SUMS file and a signed build-provenance
+    attestation; see SECURITY.md for how to verify a download.
+  * CI: actions pinned to commit SHAs (kept current by Dependabot), a
+    read-only token for builds, and shellcheck and perlcritic in make lint.
+  * Sysfs directory listings are sorted explicitly before being returned
+    (no change in behaviour).
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Mon, 02 Nov 2026 23:00:00 +0000
+
 pve-fcsan (1.8.0) trixie; urgency=medium
 
   * GUI: new Datacenter > Storage > SAN / Fibre Channel entry with the
