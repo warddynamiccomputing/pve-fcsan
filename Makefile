@@ -14,7 +14,7 @@ SAN_MODULES := $(wildcard src/PVE/SAN/*.pm)
 ARRAY_MODULES := $(wildcard src/PVE/SAN/Array/*.pm)
 FABRIC_MODULES := $(wildcard src/PVE/SAN/Fabric/*.pm)
 
-.PHONY: all install test check deb clean
+.PHONY: all install test check lint deb clean
 
 all:
 
@@ -44,6 +44,11 @@ test:
 
 check: test
 	@command -v node >/dev/null && node --check www/pvesan.js && echo "www/pvesan.js: syntax OK" || true
+
+# needs shellcheck and perlcritic (Debian: shellcheck libperl-critic-perl)
+lint:
+	shellcheck tools/*.sh debian/postinst debian/prerm debian/postrm
+	perlcritic --profile .perlcriticrc src bin
 
 # exec bits get lost when the tree is copied from Windows or a zip
 deb:
