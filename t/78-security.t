@@ -59,21 +59,27 @@ SKIP: {
     my ($cert, $key) = CERT_create(issuer => [ $ca, $cakey ], subject => { CN => 'array.test' }, purpose => 'server');
     my $right = 'sha256$' . lc(unpack('H*', Net::SSLeay::X509_digest($cert, Net::SSLeay::EVP_get_digestbyname('sha256'))));
 
-    my $srv = IO::Socket::SSL->new(Listen => 5, LocalAddr => '127.0.0.1', LocalPort => 0,
-        SSL_cert => $cert, SSL_key => $key, SSL_startHandshake => 0) or die "listen: $!";
+    # Plain TCP listener; the child does each server handshake itself. Every
+    # step has a timeout so a stalled handshake fails the test, never hangs it.
+    require IO::Socket::INET;
+    require POSIX;
+    my $srv = IO::Socket::INET->new(Listen => 5, LocalAddr => '127.0.0.1', LocalPort => 0, ReuseAddr => 1)
+        or die "listen: $!";
     my $port = $srv->sockport;
     my $pid = fork() // die "fork: $!";
     if (!$pid) {
-        for (1 .. 3) {
-            my $c = $srv->accept or next;
-            IO::Socket::SSL->start_SSL($c, SSL_server => 1, SSL_cert => $cert, SSL_key => $key);
+        alarm(60);
+        while (my $c = $srv->accept) {
+            IO::Socket::SSL->start_SSL($c, SSL_server => 1, SSL_cert => $cert, SSL_key => $key, Timeout => 10);
             close($c);
         }
-        exit(0);
+        POSIX::_exit(0); # no Test::More END block in the child
     }
+    close($srv);
     my $connect = sub {
         my ($opts) = @_;
-        my $s = IO::Socket::SSL->new(PeerHost => '127.0.0.1', PeerPort => $port, SSL_ca => [ $ca ], %$opts);
+        my $s = IO::Socket::SSL->new(PeerHost => '127.0.0.1', PeerPort => $port, SSL_ca => [ $ca ],
+            Timeout => 10, %$opts);
         close($s) if $s;
         return $s ? 1 : 0;
     };
@@ -83,6 +89,7 @@ SKIP: {
         SSL_verifycn_scheme => 'none' }), 0, 'CA-signed but not the pinned certificate: refused');
     is($connect->({ SSL_verify_mode => 1, SSL_fingerprint => $FP, SSL_verifycn_scheme => 'none' }), 1,
         'for reference: SSL_fingerprint alone lets the CA-signed certificate through');
+    kill('TERM', $pid);
     waitpid($pid, 0);
 }
 
