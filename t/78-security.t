@@ -126,6 +126,9 @@ SKIP: {
     like($js, qr/safeColumns: function\(columns\)/, 'safeColumns is defined');
     my @plain = $js =~ /renderer:\s*(?:v|\(v[^)]*\))\s*=>\s*(v\b[^,}\n]*|`\$\{v\}[^`]*`)/g;
     is_deeply(\@plain, [], 'no renderer returns its value unencoded');
+    my ($paths) = $js =~ /renderPaths: function\(value, meta, rec\) \{(.*?)\n    \},/s;
+    ok(defined($paths) && $paths =~ /Number\(rec\.data\.paths_total\)/ && $paths =~ /Number\(rec\.data\.paths_active\)/,
+        'path counts are rendered as numbers only');
 }
 
 done_testing();

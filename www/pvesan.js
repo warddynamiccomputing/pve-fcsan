@@ -205,8 +205,8 @@ Ext.define('PVE.san.Utils', {
     },
 
     renderPaths: function(value, meta, rec) {
-	let total = rec.data.paths_total || 0;
-	let active = rec.data.paths_active || 0;
+	let total = Number(rec.data.paths_total) || 0;
+	let active = Number(rec.data.paths_active) || 0;
 	let cls = active === 0 ? 'fa-times critical' : active < total ? 'fa-exclamation-triangle warning' : 'fa-check good';
 	return `<i class="fa ${cls}"></i> ${active} / ${total}`;
     },
