@@ -1,3 +1,22 @@
+pve-fcsan (1.7.1) trixie; urgency=high
+
+  * Security: array and switch connections accept only the pinned
+    certificate. Before, a certificate signed by any CA the node trusts was
+    accepted as well, for any host name, so someone able to intercept the
+    management network could read the array or switch credentials.
+    Connections are now HTTPS only, do not follow redirects and replies are
+    limited to 64 MiB.
+  * Security: the GUI HTML-encodes all grid columns. Before, text reported
+    by arrays, switches and devices (volume names, SCSI vendor and model,
+    fabric symbolic names) was shown as markup, so a device on the fabric
+    could run script in an administrator's browser session.
+  * DR import skips malformed guest records and does not take over
+    hookscripts from a replica; raw QEMU args are reported.
+  * Depends on libio-socket-ssl-perl, liblwp-protocol-https-perl and
+    libnet-ssleay-perl explicitly.
+
+ -- pve-fcsan maintainers <maintainers@example.invalid>  Mon, 02 Nov 2026 18:00:00 +0000
+
 pve-fcsan (1.7.0) trixie; urgency=medium
 
   * Automatic FC zoning on Brocade (FOS REST API) and Cisco MDS (NX-API)

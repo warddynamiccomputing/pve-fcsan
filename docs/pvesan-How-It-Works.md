@@ -1,6 +1,6 @@
 # pve-fcsan: How It Works
 
-Version 1.7.0
+Version 1.7.1
 
 ## Goals and the stack mapping
 
@@ -154,7 +154,7 @@ Array drivers turn pvesan from a SAN manager into a provisioning tool. The array
 
 **Driver contract.** A driver implements `system_info`, `pools`, `hosts`, `host_clusters`, `create_hostcluster`, `create_host`, `add_host_ports`, `add_to_hostcluster`, `create_volume`, `volume`, `find_volume_by_wwid`, `map_to_hostcluster`, `unmap_from_hostcluster`, `expand_volume` and `delete_volume`. A volume always comes back with its multipath WWID, which connects array objects to everything else in pvesan. Drivers whose arrays present volumes differently override `ensure_hostcluster`. Three hooks cover vendor differences: `options` (required settings such as `svm` or `portgroup`), `valid_hostcluster_name`, and `wwid_after_map`.
 
-**Trust.** No connection is made without a pinned SHA-256 certificate fingerprint. `array-probe` reads it, the admin compares it with the array's own display, and from then on only that certificate is accepted. Hostname checks are off because the pin is stronger than CA trust for the usual self-signed array certificate. Credentials are tested before anything is saved.
+**Trust.** No connection is made without a pinned SHA-256 certificate fingerprint. `array-probe` reads it, the admin compares it with the array's own display, and from then on only that certificate is accepted. The pin is checked by pvesan's own TLS verify callback, which accepts the server certificate only when its fingerprint matches: CA trust and host names play no part, so a certificate signed by a trusted CA but not pinned is refused too. Connections are HTTPS only, redirects are not followed and replies are limited to 64 MiB. Switches are trusted the same way. Credentials are tested before anything is saved.
 
 **Registration** (`ensure_hostcluster`) is idempotent. For each node, an array host that already owns any of its WWPNs is reused and missing ports are added; otherwise a host named after the node is created (with "force", because ports may not be logged in until zoning is done). Every host then joins the cluster's host cluster. Ports split across hosts, or a host already in another host cluster, are refused: fixing those is an admin decision on the array.
 
@@ -344,7 +344,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 
 **Layers.** `Util`, `Sysfs`, `Multipath` (parsing/rendering) and `LVM` (parsing) are pure Perl and read sysfs through `PVESAN_SYSFS_ROOT`, so a fixture tree replaces `/sys`. `Inventory`, `Ops`, `Config` and `Cluster` add Proxmox VE and command execution; `Datastore` and `Provision` compose them; `API2::SAN` exposes them; the CLI and GUI sit only on the API.
 
-**Tests** (`make test`, 1319 checks):
+**Tests** (`make test`, 1347 checks):
 
 | File | Covers |
 | --- | --- |
@@ -364,6 +364,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 | `t/75-iscsi.t` | iSCSI names, the node's initiator name, portal parsing, the exact `iscsiadm` discovery, `node.startup` and login commands (idempotent, partial failures), boot restore, node ports per protocol, refusal by drivers without iSCSI, and each driver's iSCSI host bodies and target portals against fake arrays |
 | `t/76-nimble.t` | HPE Alletra 5000/6000 (Nimble) against a stateful fake NimOS array: token login and re-login, `{data}` request bodies, paged lists, asynchronous jobs, the FC initiator group, WWID from the serial, the volume lifecycle (offline before delete), snapshots, volume and snapshot collections, clones, restore, error formats |
 | `t/77-zoning.t` | Automatic zoning: the plan (zones created, extended or left alone, names, members per fabric, zone set membership, blocked fabrics, unplaced ports, redundancy), Brocade FOS REST (session, vf-id, name server, aliases, cfg enable with checksum, abort on error) and Cisco NX-API (fcns and zone parsing, enhanced-mode commit and discard, open session) against fake switches, IBM and InfiniBox FC target ports |
+| `t/78-security.t` | The certificate pin (only the pinned certificate passes, also against a CA-signed one in a real TLS handshake), HTTPS only, no redirects, the reply size limit, malformed guest records and hookscripts in DR metadata, and that every GUI grid column is HTML-encoded |
 | `t/74-hardening.t` | `fc-discard` handing off to the LVM plugin's background discard (and the inline fallback), container configs and restore from a snapshot copy |
 | `t/80-integrate.t` | `pvesan-integrate` against a fake pve-manager tree: insertion point, upgrade from an older line, refusal without the anchor, exact removal, and that the patched `Nodes.pm` still loads with a broken pve-fcsan |
 | `t/90-compile.t` | Loads every module; fails on compile warnings. Uses the real Proxmox VE libraries when present, stubs otherwise |

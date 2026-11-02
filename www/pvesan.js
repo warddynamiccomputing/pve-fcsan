@@ -31,6 +31,22 @@ Proxmox.Utils.override_task_descriptions({
 Ext.define('PVE.san.Utils', {
     singleton: true,
 
+    // Grid cells are HTML: a column without a renderer would show array,
+    // switch and device text (volume names, SCSI inquiry strings, fabric
+    // symbolic names) as markup. Every column list goes through this, so a
+    // column without a renderer is HTML-encoded; renderers encode themselves.
+    safeColumns: function(columns) {
+	return (columns || []).map(function(c) {
+	    let col = Ext.apply({}, c);
+	    if (col.columns) {
+		col.columns = PVE.san.Utils.safeColumns(col.columns);
+	    } else if (!col.renderer && !col.xtype) {
+		col.renderer = v => Ext.htmlEncode(v);
+	    }
+	    return col;
+	});
+    },
+
     arrayTypes: {
 	'ibm-sv': {
 	    name: 'IBM FlashSystem / Spectrum Virtualize',
@@ -235,7 +251,7 @@ Ext.define('PVE.san.DeviceSelector', {
     selModel: { selType: 'checkboxmodel', mode: 'SIMPLE' },
     emptyText: gettext('No unused SAN LUNs found. Present the LUN to all nodes and rescan.'),
 
-    columns: [
+    columns: PVE.san.Utils.safeColumns([
 	{ header: gettext('Name'), dataIndex: 'name', flex: 1 },
 	{ header: 'WWID', dataIndex: 'wwid', flex: 2 },
 	{ header: gettext('Vendor'), dataIndex: 'vendor', width: 90 },
@@ -243,7 +259,7 @@ Ext.define('PVE.san.DeviceSelector', {
 	{ header: 'LUN', dataIndex: 'lun', width: 50 },
 	{ header: gettext('Size'), dataIndex: 'size', width: 90, renderer: Proxmox.Utils.render_size },
 	{ header: gettext('Paths'), dataIndex: 'paths_active', width: 80, renderer: PVE.san.Utils.renderPaths },
-    ],
+    ]),
 
     initComponent: function() {
 	let me = this;
@@ -580,9 +596,9 @@ Ext.define('PVE.san.AdapterGrid', {
     sanPath: 'adapters',
     stateId: 'grid-pvesan-adapters',
 
-    columns: [
+    columns: PVE.san.Utils.safeColumns([
 	{ header: gettext('Adapter'), dataIndex: 'name', width: 80 },
-	{ header: gettext('Type'), dataIndex: 'transport', width: 60, renderer: v => (v || '').toUpperCase() },
+	{ header: gettext('Type'), dataIndex: 'transport', width: 60, renderer: v => Ext.htmlEncode((v || '').toUpperCase()) },
 	{ header: gettext('Model'), dataIndex: 'model', flex: 1 },
 	{ header: gettext('Driver'), dataIndex: 'driver', width: 90 },
 	{ header: 'WWPN / IQN', dataIndex: 'wwpn', flex: 1 },
@@ -595,7 +611,7 @@ Ext.define('PVE.san.AdapterGrid', {
 	{ header: gettext('Devices'), dataIndex: 'devices', width: 70 },
 	{ header: gettext('Paths'), dataIndex: 'paths', width: 70 },
 	{ header: gettext('Link failures'), dataIndex: 'link_failures', width: 90, hidden: true },
-    ],
+    ]),
 
     initComponent: function() {
 	let me = this;
@@ -609,8 +625,8 @@ Ext.define('PVE.san.AdapterGrid', {
 		    let r = response.result.data;
 		    Ext.Msg.alert(gettext('Rescan'), Ext.String.format(
 			gettext('{0} paths. New: {1}. Removed: {2}. Resized: {3}.'),
-			r.paths, r.new_paths.join(' ') || '-', r.removed_paths.join(' ') || '-',
-			r.resized_maps.join(' ') || '-'));
+			r.paths, Ext.htmlEncode(r.new_paths.join(' ') || '-'), Ext.htmlEncode(r.removed_paths.join(' ') || '-'),
+			Ext.htmlEncode(r.resized_maps.join(' ') || '-')));
 		    me.reload();
 		},
 		failure: response => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
@@ -644,7 +660,7 @@ Ext.define('PVE.san.DeviceGrid', {
     stateId: 'grid-pvesan-devices',
     sanSorters: 'name',
 
-    columns: [
+    columns: PVE.san.Utils.safeColumns([
 	{ header: gettext('Name'), dataIndex: 'name', width: 160 },
 	{ header: 'WWID', dataIndex: 'wwid', flex: 1 },
 	{ header: gettext('Vendor'), dataIndex: 'vendor', width: 90 },
@@ -653,7 +669,7 @@ Ext.define('PVE.san.DeviceGrid', {
 	{ header: gettext('Size'), dataIndex: 'size', width: 90, renderer: Proxmox.Utils.render_size },
 	{ header: gettext('Paths'), dataIndex: 'paths_active', width: 80, renderer: PVE.san.Utils.renderPaths },
 	{ header: gettext('Policy'), dataIndex: 'policy', width: 110 },
-	{ header: gettext('No path retry'), dataIndex: 'no_path_retry', width: 100, hidden: true, renderer: v => v || gettext('default') },
+	{ header: gettext('No path retry'), dataIndex: 'no_path_retry', width: 100, hidden: true, renderer: v => Ext.htmlEncode(v || gettext('default')) },
 	{ header: gettext('Usage'), dataIndex: 'usage', width: 160 },
 	{
 	    header: gettext('Flags'),
@@ -666,7 +682,7 @@ Ext.define('PVE.san.DeviceGrid', {
 		return f.join(', ');
 	    },
 	},
-    ],
+    ]),
 
     initComponent: function() {
 	let me = this;
@@ -780,7 +796,7 @@ Ext.define('PVE.san.PathGrid', {
 
     features: [{ ftype: 'grouping', groupHeaderTpl: '{name} ({rows.length} paths)' }],
 
-    columns: [
+    columns: PVE.san.Utils.safeColumns([
 	{ header: gettext('Device'), dataIndex: 'device', width: 160 },
 	{ header: gettext('Path'), dataIndex: 'dev', width: 70 },
 	{ header: 'H:C:T:L', dataIndex: 'hctl', width: 90 },
@@ -789,7 +805,7 @@ Ext.define('PVE.san.PathGrid', {
 	{ header: gettext('Multipath'), dataIndex: 'dm_state', width: 100, renderer: PVE.san.Utils.renderState },
 	{ header: gettext('Checker'), dataIndex: 'chk_state', width: 100, renderer: PVE.san.Utils.renderState },
 	{ header: gettext('Priority'), dataIndex: 'priority', width: 70 },
-    ],
+    ]),
 
     initComponent: function() {
 	let me = this;
@@ -807,7 +823,7 @@ Ext.define('PVE.san.DatastoreGrid', {
     stateId: 'grid-pvesan-datastores',
     sanSorters: 'storage',
 
-    columns: [
+    columns: PVE.san.Utils.safeColumns([
 	{ header: 'ID', dataIndex: 'storage', width: 120 },
 	{ header: gettext('Display name'), dataIndex: 'label', flex: 1 },
 	{ header: gettext('Type'), dataIndex: 'type', width: 60 },
@@ -830,9 +846,9 @@ Ext.define('PVE.san.DatastoreGrid', {
 		return rec.data.active ? PVE.san.Utils.renderState('mounted') : PVE.san.Utils.renderState('offline');
 	    },
 	},
-	{ header: gettext('Nodes'), dataIndex: 'nodes', width: 120, renderer: v => v || gettext('All') },
+	{ header: gettext('Nodes'), dataIndex: 'nodes', width: 120, renderer: v => Ext.htmlEncode(v || gettext('All')) },
 	{ header: 'UNMAP', dataIndex: 'discard', width: 60, renderer: Proxmox.Utils.format_boolean },
-    ],
+    ]),
 
     initComponent: function() {
 	let me = this;
@@ -885,14 +901,14 @@ Ext.define('PVE.san.DatastoreGrid', {
 		    url: `/nodes/${me.nodename}/san/datastores/${rec().storage}/guests`,
 		    autoShow: true,
 		    emptyText: gettext('No guest has disks on this datastore.'),
-		    columns: [
+		    columns: PVE.san.Utils.safeColumns([
 			{ header: 'ID', dataIndex: 'vmid', width: 70 },
 			{ header: gettext('Type'), dataIndex: 'type', width: 60 },
 			{ header: gettext('Name'), dataIndex: 'name', width: 140 },
 			{ header: gettext('Node'), dataIndex: 'node', width: 100 },
 			{ header: gettext('Status'), dataIndex: 'status', width: 80 },
 			{ header: gettext('Disks'), dataIndex: 'disks', flex: 1 },
-		    ],
+		    ]),
 		}),
 	    },
 	    {
@@ -972,7 +988,7 @@ Ext.define('PVE.san.ListWindow', {
 		proxy: { type: 'proxmox', url: `/api2/json${me.url}` },
 		autoLoad: !me.manual,
 	    }),
-	    columns: me.columns,
+	    columns: PVE.san.Utils.safeColumns(me.columns),
 	    tbar: me.tbar,
 	    emptyText: me.emptyText || gettext('No data'),
 	});
@@ -1030,7 +1046,7 @@ Ext.define('PVE.san.ArrayView', {
 	    `<th align="left">${gettext('Free')}</th><th align="left">${gettext('Used')}</th></tr>`;
 	(v.pools || []).forEach(p => {
 	    out += `<tr><td>${e(p.name)}</td><td>${size(p.capacity)}</td><td>${size(p.free)}</td>` +
-		`<td>${p.used_pct === null || p.used_pct === undefined ? '-' : p.used_pct + ' %'}</td></tr>`;
+		`<td>${p.used_pct === null || p.used_pct === undefined ? '-' : Ext.htmlEncode(String(p.used_pct)) + ' %'}</td></tr>`;
 	});
 	out += `</table><h3>${gettext('Volumes')}</h3><table class="x-grid-item" style="width:100%">` +
 	    `<tr><th align="left">${gettext('Volume')}</th><th align="left">${gettext('Provisioned')}</th>` +
@@ -1058,7 +1074,7 @@ Ext.define('PVE.san.HealthGrid', {
 
     title: gettext('Health'),
 
-    columns: [{ header: gettext('Problem on this node'), dataIndex: 'text', flex: 1 }],
+    columns: PVE.san.Utils.safeColumns([{ header: gettext('Problem on this node'), dataIndex: 'text', flex: 1 }]),
     emptyText: gettext('All datastore LUNs have all their paths.'),
 
     initComponent: function() {
@@ -1108,18 +1124,18 @@ Ext.define('PVE.san.IOStatsGrid', {
     stateId: 'grid-pvesan-iostats',
     sanSorters: 'name',
 
-    columns: [
+    columns: PVE.san.Utils.safeColumns([
 	{ header: gettext('LUN'), dataIndex: 'name', width: 160 },
 	{ header: gettext('Datastore'), dataIndex: 'datastore', width: 120 },
 	{ header: gettext('Read IOPS'), dataIndex: 'r_iops', width: 90 },
 	{ header: gettext('Write IOPS'), dataIndex: 'w_iops', width: 90 },
 	{ header: gettext('Read'), dataIndex: 'r_bps', width: 100, renderer: v => Proxmox.Utils.render_size(v) + '/s' },
 	{ header: gettext('Write'), dataIndex: 'w_bps', width: 100, renderer: v => Proxmox.Utils.render_size(v) + '/s' },
-	{ header: gettext('Read latency'), dataIndex: 'r_lat_ms', width: 100, renderer: v => `${v} ms` },
-	{ header: gettext('Write latency'), dataIndex: 'w_lat_ms', width: 100, renderer: v => `${v} ms` },
-	{ header: gettext('Busy'), dataIndex: 'util', width: 70, renderer: v => `${v} %` },
+	{ header: gettext('Read latency'), dataIndex: 'r_lat_ms', width: 100, renderer: v => `${Ext.htmlEncode(v)} ms` },
+	{ header: gettext('Write latency'), dataIndex: 'w_lat_ms', width: 100, renderer: v => `${Ext.htmlEncode(v)} ms` },
+	{ header: gettext('Busy'), dataIndex: 'util', width: 70, renderer: v => `${Ext.htmlEncode(v)} %` },
 	{ header: gettext('In flight'), dataIndex: 'in_flight', width: 70 },
-    ],
+    ]),
 
     initComponent: function() {
 	let me = this;
@@ -1339,14 +1355,14 @@ Ext.define('PVE.san.ArrayStatus', {
 	    xtype: 'grid',
 	    store,
 	    dockedItems: [{ xtype: 'container', dock: 'top', items: [header] }],
-	    columns: [
+	    columns: PVE.san.Utils.safeColumns([
 		{ header: gettext('Node'), dataIndex: 'node', width: 120 },
 		{ header: gettext('Registered'), dataIndex: 'registered', width: 100,
 		    renderer: v => PVE.san.Utils.renderState(v ? 'ok' : 'faulty') },
 		{ header: gettext('Array host'), dataIndex: 'host', width: 140 },
 		{ header: gettext('Host cluster'), dataIndex: 'hostcluster', width: 130 },
 		{ header: gettext('Unregistered ports'), dataIndex: 'missing', flex: 1 },
-	    ],
+	    ]),
 	}];
 	me.buttons = [
 	    { text: gettext('Reload'), handler: load },
@@ -1514,7 +1530,7 @@ Ext.define('PVE.san.ArrayGrid', {
     stateId: 'grid-pvesan-arrays',
     sanSorters: 'array',
 
-    columns: [
+    columns: PVE.san.Utils.safeColumns([
 	{ header: 'ID', dataIndex: 'array', width: 110 },
 	{ header: gettext('Type'), dataIndex: 'type', width: 70 },
 	{ header: gettext('Address'), dataIndex: 'address', width: 140 },
@@ -1522,7 +1538,7 @@ Ext.define('PVE.san.ArrayGrid', {
 	{ header: gettext('Host cluster'), dataIndex: 'hostcluster', width: 130 },
 	{ header: gettext('Datastores'), dataIndex: 'datastores', flex: 1 },
 	{ header: gettext('Description'), dataIndex: 'description', flex: 1, hidden: true },
-    ],
+    ]),
 
     initComponent: function() {
 	let me = this;
@@ -1576,13 +1592,13 @@ Ext.define('PVE.san.ArrayGrid', {
 		    let win = Ext.create('PVE.san.ListWindow', {
 			title: Ext.String.format(gettext('Hosts on array {0}'), Ext.htmlEncode(arrayId)),
 			url: `/nodes/${me.nodename}/san/arrays/${arrayId}/hosts`,
-			columns: [
+			columns: PVE.san.Utils.safeColumns([
 			    { header: gettext('Host'), dataIndex: 'host', width: 160 },
 			    { header: gettext('Host cluster'), dataIndex: 'hostcluster', width: 130 },
 			    { header: 'WWPNs', dataIndex: 'wwpns', flex: 1 },
 			    { header: 'IQNs', dataIndex: 'iqns', flex: 1 },
 			    { header: gettext('Removed node'), dataIndex: 'stale', width: 110, renderer: Proxmox.Utils.format_boolean },
-			],
+			]),
 			tbar: [{
 			    text: gettext('Remove host'),
 			    handler: function() {
@@ -1768,15 +1784,15 @@ Ext.define('PVE.san.FabricGrid', {
     stateId: 'grid-pvesan-fabrics',
     sanSorters: 'fabric',
 
-    columns: [
+    columns: PVE.san.Utils.safeColumns([
 	{ header: 'ID', dataIndex: 'fabric', width: 110 },
 	{ header: gettext('Type'), dataIndex: 'type', width: 80 },
 	{ header: gettext('Address'), dataIndex: 'address', width: 140 },
-	{ header: 'VSAN / VF', width: 90, renderer: (v, m, r) => r.data.vsan || r.data['vf-id'] || '-' },
-	{ header: gettext('Zone set'), dataIndex: 'zoneset', width: 130, renderer: v => v || gettext('active') },
+	{ header: 'VSAN / VF', width: 90, renderer: (v, m, r) => Ext.htmlEncode(r.data.vsan || r.data['vf-id'] || '-') },
+	{ header: gettext('Zone set'), dataIndex: 'zoneset', width: 130, renderer: v => Ext.htmlEncode(v || gettext('active')) },
 	{ header: gettext('Switch'), dataIndex: 'system', flex: 1 },
 	{ header: gettext('Description'), dataIndex: 'description', flex: 1, hidden: true },
-    ],
+    ]),
 
     initComponent: function() {
 	let me = this;
@@ -1807,13 +1823,13 @@ Ext.define('PVE.san.FabricGrid', {
 			modal: true, width: 820, height: 440, layout: 'fit',
 			items: [{
 			    xtype: 'grid', store,
-			    columns: [
+			    columns: PVE.san.Utils.safeColumns([
 				{ header: 'WWPN', dataIndex: 'wwpn', width: 180 },
 				{ header: gettext('Role'), dataIndex: 'role', width: 80 },
 				{ header: gettext('Belongs to'), dataIndex: 'owner', width: 140 },
 				{ header: gettext('Symbolic name'), dataIndex: 'symbolic', flex: 1 },
 				{ header: 'WWNN', dataIndex: 'wwnn', width: 180, hidden: true },
-			    ],
+			    ]),
 			}],
 		    });
 		    win.show();
@@ -1907,14 +1923,14 @@ Ext.define('PVE.san.ZoningPlan', {
 		xtype: 'grid',
 		store,
 		features: [{ ftype: 'grouping', groupHeaderTpl: '{[gettext("Fabric")]} {name}' }],
-		columns: [
+		columns: PVE.san.Utils.safeColumns([
 		    { header: gettext('Action'), dataIndex: 'action', width: 140, renderer: actionIcon },
 		    { header: gettext('Zone set'), dataIndex: 'zoneset', width: 110 },
 		    { header: gettext('Node'), dataIndex: 'node', width: 100 },
 		    { header: gettext('Node port'), dataIndex: 'initiator', width: 170 },
 		    { header: gettext('Zone'), dataIndex: 'zone', flex: 1 },
 		    { header: gettext('Array ports'), dataIndex: 'targets', flex: 1 },
-		],
+		]),
 	    },
 	];
 	me.buttons = [
@@ -2049,14 +2065,14 @@ Ext.define('PVE.san.SnapshotGrid', {
     stateful: true,
     stateId: 'grid-pvesan-snapshots',
 
-    columns: [
+    columns: PVE.san.Utils.safeColumns([
 	{ header: gettext('Name'), dataIndex: 'name', flex: 1 },
 	{ header: gettext('Created'), dataIndex: 'created', width: 160, renderer: Proxmox.Utils.render_timestamp },
 	{ header: gettext('Size'), dataIndex: 'size', width: 100, renderer: Proxmox.Utils.render_size },
 	{ header: gettext('Volumes'), dataIndex: 'volumes', width: 80 },
 	{ header: gettext('Scheduled'), dataIndex: 'auto', width: 90, renderer: Proxmox.Utils.format_boolean },
 	{ header: gettext('Mounted as'), dataIndex: 'copy', width: 200, renderer: v => Ext.htmlEncode(v || '-') },
-    ],
+    ]),
 
     initComponent: function() {
 	let me = this;
@@ -2326,14 +2342,14 @@ Ext.define('PVE.san.ReplicationPanel', {
 		store: repStore,
 		selModel: repSm,
 		emptyText: gettext('No replicated pvesan datastores on this array.'),
-		columns: [
+		columns: PVE.san.Utils.safeColumns([
 		    { header: gettext('Replica'), dataIndex: 'replica', flex: 1 },
 		    { header: gettext('Source array'), dataIndex: 'source', width: 120 },
 		    { header: gettext('Datastore'), dataIndex: 'storage', width: 120 },
 		    { header: gettext('Newest'), dataIndex: 'latest', width: 170 },
 		    { header: gettext('Taken'), dataIndex: 'latest-time', width: 150, renderer: Proxmox.Utils.render_timestamp },
 		    { header: gettext('Replicas'), dataIndex: 'replicas', width: 80 },
-		],
+		]),
 		tbar: [
 		    {
 			xtype: 'combobox',

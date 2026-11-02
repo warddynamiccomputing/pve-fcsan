@@ -95,6 +95,23 @@ sub format_plan {
 }
 
 # New VM IDs for the guests: { old => new } and the IDs already taken.
+# Guest records from a replica's metadata are data from another site: keep
+# only well-formed ones (VM ID 100..999999999, type qemu or lxc, a config).
+sub valid_guests {
+    my ($guests) = @_;
+    my @ok;
+    for my $g (ref($guests) eq 'ARRAY' ? @$guests : ()) {
+        my $id = ref($g) eq 'HASH' ? $g->{vmid} // '' : '';
+        if ($id !~ /^[1-9]\d{2,8}$/ || ($g->{type} // '') !~ /^(?:qemu|lxc)$/ || ref($g->{config}) || !defined($g->{config})) {
+            print "WARNING: skipping a malformed guest record in the DR metadata (VM ID '"
+                . ($id =~ /^[\w.-]{0,20}$/ ? $id : '?') . "')\n";
+            next;
+        }
+        push @ok, $g;
+    }
+    return \@ok;
+}
+
 sub vmid_map {
     my ($guests, $offset, $in_use) = @_;
     my (%map, @taken);
@@ -140,6 +157,12 @@ sub dr_guest_config {
         }
         if ($key =~ /^(?:parent|lock|vmstate|runningmachine|runningcpu)$/ || ($o{test} && $key eq 'onboot')) {
             next;
+        } elsif ($key eq 'hookscript') {
+            # runs as root on every start: never taken over from a replica unseen
+            push @notes, "hookscript ($val) is left out - check the script and set it again";
+        } elsif ($key eq 'args') {
+            push @out, $line;
+            push @notes, "args (raw QEMU arguments) carried over - check them before starting the guest";
         } elsif ($key =~ $disk_re) {
             if ($val =~ /^\Q$from\E:([^,]+)(.*)$/) {
                 my ($vol, $opts) = ($1, $2);
@@ -652,6 +675,7 @@ sub import_luns {
             print "guest configs from " . strftime('%Y-%m-%d %H:%M:%S', localtime($meta->{written})) . ": "
                 . scalar(@{$meta->{guests}}) . " guest(s)\n";
         }
+        $meta->{guests} = valid_guests($meta->{guests});
         my $taken;
         ($map, $taken) = vmid_map($meta->{guests}, $p{vmid_offset}, PVE::SAN::Cluster::guest_status());
         die "VM ID(s) @$taken are already used in this cluster - set 'vmid-offset'\n" if @$taken;

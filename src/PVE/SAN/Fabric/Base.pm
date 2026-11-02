@@ -55,6 +55,7 @@ sub new {
 
 *host_port = \&PVE::SAN::Array::Base::host_port;
 *ua = \&PVE::SAN::Array::Base::ua;
+*send_request = \&PVE::SAN::Array::Base::send_request;
 *short = \&PVE::SAN::Array::Base::short;
 *decode = \&PVE::SAN::Array::Base::decode;
 *basic_auth = \&PVE::SAN::Array::Base::basic_auth;
@@ -78,9 +79,7 @@ sub request {
         $req->content($json->encode($body));
     }
     $req->header($_ => $headers->{$_}) for keys %{$headers // {}};
-    my $res = $self->ua->request($req);
-    my %h = map { lc($_) => scalar($res->header($_)) } $res->header_field_names;
-    return ($res->code, $res->decoded_content // '', \%h);
+    return $self->send_request($req);
 }
 
 # A value that may be one item or a list of them.
