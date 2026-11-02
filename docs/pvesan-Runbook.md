@@ -1,6 +1,6 @@
 # pve-fcsan Runbook
 
-Version 1.7.0
+Version 1.7.1
 
 ## Purpose and scope
 
@@ -112,7 +112,7 @@ make deb
 **Install** on each node, one at a time:
 
 ```bash
-apt install ./pve-fcsan_1.7.0_all.deb
+apt install ./pve-fcsan_1.7.1_all.deb
 /usr/share/pve-fcsan/pvesan-integrate status
 pvesan adapters
 ```
@@ -432,7 +432,7 @@ A failover keeps the guests' identities (MACs, UUIDs, VM IDs unless you set an o
 
 **LUNs promoted by hand (any array).** If the array's own tools promoted or copied the replica volumes and they are mapped to the DR cluster, bring them up with `pvesan dr import gold --wwids <wwid>[,<wwid>...]` (add `--test 1` for an isolated test copy). `cleanup` of such a test copy releases the LUNs and leaves their data alone.
 
-**Limits.** Replicas are crash-consistent. Only the current state of a guest is brought up, not its Proxmox snapshots. HA resources, firewall settings outside the guest config, backup jobs and pool membership stay at the primary site and need to be set up at the DR site. Disks on other storages are kept only if that storage exists at the DR site. A CD-ROM image that doesn't exist there is emptied.
+**Limits.** Replicas are crash-consistent. Only the current state of a guest is brought up, not its Proxmox snapshots. HA resources, firewall settings outside the guest config, backup jobs and pool membership stay at the primary site and need to be set up at the DR site. Disks on other storages are kept only if that storage exists at the DR site. A CD-ROM image that doesn't exist there is emptied. A `hookscript` is not taken over (it runs as root on every start): check the script at the DR site and set it again. Raw QEMU `args` are kept and reported, so check them before starting the guest.
 
 ### P19. iSCSI arrays
 

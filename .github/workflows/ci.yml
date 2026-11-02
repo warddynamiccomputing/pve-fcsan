@@ -18,7 +18,7 @@ jobs:
       - name: Install build tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends build-essential debhelper perl nodejs git ca-certificates
+          apt-get install -y --no-install-recommends build-essential debhelper perl nodejs git ca-certificates libwww-perl liblwp-protocol-https-perl libio-socket-ssl-perl libnet-ssleay-perl
 
       - uses: actions/checkout@v4
 

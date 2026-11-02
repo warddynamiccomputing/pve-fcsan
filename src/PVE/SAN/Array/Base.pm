@@ -162,20 +162,59 @@ sub query_string {
     return '?' . join('&', map { escape($_) . '=' . escape($query->{$_}) } sort keys %$query);
 }
 
+# Largest reply accepted from an array or switch.
+our $MAX_RESPONSE = 64 * 1024 * 1024;
+
+# SHA-256 of a certificate (Net::SSLeay X509 handle) as lower-case hex.
+sub cert_sha256 {
+    my ($cert) = @_;
+    require Net::SSLeay;
+    return lc(unpack('H*', Net::SSLeay::X509_digest($cert, Net::SSLeay::EVP_get_digestbyname('sha256'))));
+}
+
+# TLS verify callback that accepts only the pinned certificate: the server's
+# own certificate (depth 0) must have the pinned SHA-256 fingerprint; CA trust
+# and host names play no part. (IO::Socket::SSL's SSL_fingerprint is not
+# enough: it only adds the pin to normal CA verification, so with host name
+# checks off any CA-signed certificate would pass.)
+sub pin_verifier {
+    my ($fingerprint) = @_;
+    my ($want) = lc($fingerprint // '') =~ /^sha256\$([0-9a-f]{64})$/
+        or die "invalid certificate fingerprint (expected sha256\$ and 64 hex digits)\n";
+    return sub {
+        my ($ok, $store, $certname, $error, $cert, $depth) = @_;
+        return 1 if $depth; # chain certificates do not matter, the server's own is pinned
+        return cert_sha256($cert) eq $want ? 1 : 0;
+    };
+}
+
 # The array's certificate is trusted only by its pinned SHA-256 fingerprint
-# (array certificates are usually self-signed).
+# (array certificates are usually self-signed). HTTPS only, no redirects.
 sub ua {
     my ($self) = @_;
     require LWP::UserAgent;
     return $self->{ua} //= LWP::UserAgent->new(
         timeout => 120,
         agent => 'pve-fcsan',
+        max_redirect => 0,
+        protocols_allowed => ['https'],
+        max_size => $MAX_RESPONSE,
         ssl_opts => {
             verify_hostname => 0,
-            SSL_verify_mode => 1, # SSL_VERIFY_PEER, satisfied by the fingerprint
-            SSL_fingerprint => $self->{fingerprint},
+            SSL_verify_mode => 1, # SSL_VERIFY_PEER, decided by the callback alone
+            SSL_verify_callback => pin_verifier($self->{fingerprint}),
         },
     );
+}
+
+# Send an HTTP::Request with ua(). Returns (code, body, { lower-case header => value }).
+sub send_request {
+    my ($self, $req) = @_;
+    my $res = $self->ua->request($req);
+    die "reply from " . $self->host_port . " is larger than " . ($MAX_RESPONSE >> 20) . " MiB, refused\n"
+        if ($res->header('Client-Aborted') // '') eq 'max_size';
+    my %h = map { lc($_) => scalar($res->header($_)) } $res->header_field_names;
+    return ($res->code, $res->decoded_content // '', \%h);
 }
 
 # Generic HTTPS request. Returns (code, body, { lower-case header => value }).
@@ -193,9 +232,7 @@ sub request {
         $req->header('Content-Type' => 'application/json');
         $req->content($json->encode($body));
     }
-    my $res = $self->ua->request($req);
-    my %h = map { lc($_) => scalar($res->header($_)) } $res->header_field_names;
-    return ($res->code, $res->decoded_content // '', \%h);
+    return $self->send_request($req);
 }
 
 sub decode {

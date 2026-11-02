@@ -3,6 +3,20 @@
 The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
+## 1.7.1
+- Security: array and switch connections now accept only the pinned
+  certificate. Before, a certificate signed by any CA the node trusts was
+  accepted too, for any host name, so someone able to intercept the
+  management network could capture array or switch credentials. Connections
+  are HTTPS only, redirects are not followed and replies are limited to
+  64 MiB.
+- Security: every GUI grid column is HTML-encoded. Before, text reported by
+  arrays, switches and devices (volume names, SCSI vendor and model, fabric
+  symbolic names) was rendered as markup, so a device on the fabric could run
+  script in an administrator's browser session.
+- DR import skips malformed guest records from the replica's metadata and
+  does not take over hookscripts; raw QEMU `args` are kept and reported.
+
 ## 1.7.0
 - Automatic FC zoning on Brocade (FOS REST API, 8.2.1+) and Cisco MDS
   (NX-API) fabrics. New `pvesan fabric add/set/remove/list/status` registers

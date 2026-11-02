@@ -15,9 +15,15 @@ reproduce.
 - Array passwords and API tokens are stored in `/etc/pve/priv/pvesan/`, which
   only root can read and which is replicated by the Proxmox cluster
   filesystem.
-- Arrays are trusted only by a SHA-256 certificate fingerprint that the admin
-  confirms when adding the array (trust on first use); any other certificate
-  is refused.
+- Arrays and FC switches are trusted only by a SHA-256 certificate
+  fingerprint that the admin confirms when adding them (trust on first use);
+  any other certificate is refused, including one signed by a trusted CA
+  (fixed in 1.7.1: before, a CA-signed certificate was accepted too).
+  Connections are HTTPS only and do not follow redirects.
+- The GUI HTML-encodes everything arrays, switches and devices report
+  (volume names, SCSI inquiry strings, fabric symbolic names).
+- Guest configs brought up from a DR replica are checked; hookscripts are not
+  taken over.
 - All cluster-wide actions need `Sys.Modify` on `/` and `Datastore.Allocate`
   on `/storage`.
 
