@@ -3,6 +3,11 @@
 The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
+## Unreleased
+- GUI: the path count column (active / total paths) is rendered from numbers
+  only. Not exploitable before (the server counts the paths itself), now
+  safe even if a bad value ever reached it.
+
 ## 1.7.1
 - Security: array and switch connections now accept only the pinned
   certificate. Before, a certificate signed by any CA the node trusts was
