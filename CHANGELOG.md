@@ -3,6 +3,16 @@
 The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
+## 1.8.1
+- Releases now come with a `SHA256SUMS` file and a signed build-provenance
+  attestation, so you can check a `.deb` came from this repository's CI
+  (see [SECURITY.md](SECURITY.md#verifying-a-download)).
+- CI: GitHub Actions pinned to commit SHAs and kept current by Dependabot;
+  builds run with a read-only token; `make lint` adds shellcheck and
+  perlcritic.
+- Sysfs directory listings are sorted explicitly before being returned (no
+  change in behaviour).
+
 ## 1.8.0
 - GUI: new **Datacenter → Storage → SAN / Fibre Channel** entry with the
   cluster-wide tabs (Datastores, Snapshots, Disaster recovery, Arrays,
