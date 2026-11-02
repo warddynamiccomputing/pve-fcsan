@@ -59,7 +59,7 @@ flowchart TB
 | Storage type `fcsan` | `PVE/Storage/Custom/FCSANPlugin.pm` | Proxmox VE loads every module in `Storage/Custom`. It subclasses `LVMPlugin` and overrides `activate_storage`, `free_image` (opt-in discard), `options` and `properties` |
 | REST API | `PVE/API2/SAN.pm` | Registered as `/nodes/{node}/san` by one marked line in `PVE/API2/Nodes.pm` |
 | CLI | `PVE/CLI/pvesan.pm`, `/usr/sbin/pvesan` | `PVE::CLIHandler` maps each command onto an API method |
-| GUI | `/usr/share/pve-manager/js/pvesan.js` | One `<script>` line in `index.html.tpl`; an Ext `override` of `PVE.panel.Config` adds the panel to the node's Disks group |
+| GUI | `/usr/share/pve-manager/js/pvesan.js` | One `<script>` line in `index.html.tpl`; an Ext `override` of `PVE.panel.Config` adds the datacenter panel below Datacenter → Storage and the node panel to the node's Disks group; the datacenter tables ask every online node in parallel (`GET /nodes/{node}/san/...`) and merge the answers in the browser |
 | Integration | `/usr/share/pve-fcsan/pvesan-integrate` | Run by `postinst`, re-run by a dpkg trigger when pve-manager replaces either file |
 | Health timer | `pvesan-monitor.timer`, `pvesan-alert-*.txt.hbs` | `pvesan monitor-run` every 5 minutes on every node; alerts through `PVE::Notify` |
 | Boot sync | `pvesan-sync.service` | `pvesan sync` after `pve-cluster` and `multipathd`, before `pvestatd` and guests |
@@ -344,7 +344,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 
 **Layers.** `Util`, `Sysfs`, `Multipath` (parsing/rendering) and `LVM` (parsing) are pure Perl and read sysfs through `PVESAN_SYSFS_ROOT`, so a fixture tree replaces `/sys`. `Inventory`, `Ops`, `Config` and `Cluster` add Proxmox VE and command execution; `Datastore` and `Provision` compose them; `API2::SAN` exposes them; the CLI and GUI sit only on the API.
 
-**Tests** (`make test`, 1348 checks):
+**Tests** (`make test`, 1371 checks):
 
 | File | Covers |
 | --- | --- |
@@ -365,6 +365,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 | `t/76-nimble.t` | HPE Alletra 5000/6000 (Nimble) against a stateful fake NimOS array: token login and re-login, `{data}` request bodies, paged lists, asynchronous jobs, the FC initiator group, WWID from the serial, the volume lifecycle (offline before delete), snapshots, volume and snapshot collections, clones, restore, error formats |
 | `t/77-zoning.t` | Automatic zoning: the plan (zones created, extended or left alone, names, members per fabric, zone set membership, blocked fabrics, unplaced ports, redundancy), Brocade FOS REST (session, vf-id, name server, aliases, cfg enable with checksum, abort on error) and Cisco NX-API (fcns and zone parsing, enhanced-mode commit and discard, open session) against fake switches, IBM and InfiniBox FC target ports |
 | `t/78-security.t` | The certificate pin (only the pinned certificate passes, also against a CA-signed one in a real TLS handshake), HTTPS only, no redirects, the reply size limit, malformed guest records and hookscripts in DR metadata, and that every GUI grid column is HTML-encoded |
+| `t/79-gui.t` | GUI layout: the Datacenter → Storage entry and its tabs, the node panel's local tabs, that every endpoint the datacenter view asks each node for exists, and how answers and unreachable nodes are collected |
 | `t/74-hardening.t` | `fc-discard` handing off to the LVM plugin's background discard (and the inline fallback), container configs and restore from a snapshot copy |
 | `t/80-integrate.t` | `pvesan-integrate` against a fake pve-manager tree: insertion point, upgrade from an older line, refusal without the anchor, exact removal, and that the patched `Nodes.pm` still loads with a broken pve-fcsan |
 | `t/90-compile.t` | Loads every module; fails on compile warnings. Uses the real Proxmox VE libraries when present, stubs otherwise |

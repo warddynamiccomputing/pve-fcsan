@@ -4,6 +4,12 @@ The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
 ## Unreleased
+- GUI: new **Datacenter → Storage → SAN / Fibre Channel** entry with the
+  cluster-wide tabs (Datastores, Snapshots, Disaster recovery, Arrays,
+  Fabrics) and all nodes at once: LUNs with a column per node showing its
+  paths, and Paths, Adapters, Performance and Health with a Node column.
+  Offline or unreachable nodes are named above the table. The node panel
+  (Node → Disks) keeps only the node's own tabs.
 - GUI: the path count column (active / total paths) is rendered from numbers
   only. Not exploitable before (the server counts the paths itself), now
   safe even if a bad value ever reached it.
