@@ -211,6 +211,91 @@ Ext.define('PVE.san.Utils', {
 	return `<i class="fa ${cls}"></i> ${active} / ${total}`;
     },
 
+    // One LUN's paths on one node in the datacenter view (undefined: the node
+    // does not see the LUN).
+    renderNodePaths: function(p) {
+	if (!p) {
+	    return `<i class="fa fa-times critical"></i> ${gettext('not seen')}`;
+	}
+	let total = Number(p.total) || 0;
+	let active = Number(p.active) || 0;
+	let cls = active === 0 ? 'fa-times critical' : active < total ? 'fa-exclamation-triangle warning' : 'fa-check good';
+	return `<i class="fa ${cls}"></i> ${active} / ${total}`;
+    },
+
+    // GET /nodes/<node>/san/<path> on every online node in parallel.
+    // done(results, missing): results [{ node, data }], missing [{ node, reason }].
+    fromEveryNode: function(path, waitTarget, done) {
+	let finish = function(results, missing) {
+	    if (waitTarget && !waitTarget.isDestroyed) {
+		waitTarget.setLoading(false);
+		done(results, missing);
+	    }
+	};
+	if (waitTarget) {
+	    waitTarget.setLoading(true);
+	}
+	Proxmox.Utils.API2Request({
+	    url: '/nodes',
+	    method: 'GET',
+	    success: function(response) {
+		let nodes = response.result.data || [];
+		let results = [], missing = [];
+		let online = nodes.filter(n => n.status === 'online');
+		nodes.filter(n => n.status !== 'online').forEach(n => missing.push({ node: n.node, reason: gettext('offline') }));
+		let pending = online.length;
+		if (!pending) {
+		    finish(results, missing);
+		    return;
+		}
+		// (API2Request runs 'callback' before success/failure, so count here)
+		let one = () => { if (--pending === 0) { finish(results, missing); } };
+		online.forEach(n => Proxmox.Utils.API2Request({
+		    url: `/nodes/${encodeURIComponent(n.node)}/san/${path}`,
+		    method: 'GET',
+		    success: r => { results.push({ node: n.node, data: r.result.data }); one(); },
+		    failure: r => { missing.push({ node: n.node, reason: r.htmlStatus }); one(); },
+		}));
+	    },
+	    failure: function(response) {
+		finish([], [{ node: gettext('cluster'), reason: response.htmlStatus }]);
+	    },
+	});
+    },
+
+    // The bar above a datacenter table naming nodes that gave no answer.
+    // reason is already HTML-encoded (htmlStatus) or a gettext string.
+    showMissing: function(grid, missing) {
+	let bar = grid.down('#nodeStatus');
+	if (!bar) {
+	    return;
+	}
+	bar.setHidden(!missing.length);
+	bar.update(missing.map(m => `<i class="fa fa-exclamation-triangle warning"></i> `
+	    + Ext.String.format(gettext('Node {0} not included: {1}'), Ext.htmlEncode(m.node), m.reason)).join('<br>'));
+    },
+
+    // Devices lists of several nodes -> one row per WWID with per_node paths.
+    mergeLuns: function(results) {
+	let byWwid = {};
+	results.forEach(function(r) {
+	    (r.data || []).forEach(function(d) {
+		if (!d.wwid) {
+		    return;
+		}
+		let l = byWwid[d.wwid] = byWwid[d.wwid] || { wwid: d.wwid, per_node: {}, seen: 0 };
+		['name', 'vendor', 'model', 'size', 'usage'].forEach(k => {
+		    if ((l[k] === undefined || l[k] === '') && d[k] !== undefined) { l[k] = d[k]; }
+		});
+		if (!l.per_node[r.node]) {
+		    l.seen++;
+		}
+		l.per_node[r.node] = { active: d.paths_active, total: d.paths_total };
+	    });
+	});
+	return Object.values(byWwid);
+    },
+
     renderState: function(value) {
 	if (!value) {
 	    return '-';
@@ -2425,6 +2510,192 @@ Ext.define('PVE.san.ReplicationPanel', {
     },
 });
 
+// --- datacenter view: the same data from every node in one table ---
+
+// Ask every online node for one per-node SAN list and show the rows together
+// with a Node column. Nodes that are offline or do not answer are named in
+// the bar above the table instead of failing the view.
+Ext.define('PVE.san.ClusterGrid', {
+    extend: 'Ext.grid.Panel',
+    alias: 'widget.pveSanClusterGrid',
+
+    stateful: true,
+
+    // sanPath: per-node API path; nodeColumns: the per-node grid's columns;
+    // extract(data): the rows of one node's reply (default: the reply itself)
+
+    initComponent: function() {
+	let me = this;
+	me.store = Ext.create('Ext.data.Store', {
+	    fields: ['node'],
+	    sorters: ['node'].concat(me.sanSorters || []),
+	    groupField: me.groupByNode ? 'node' : undefined,
+	});
+	me.columns = PVE.san.Utils.safeColumns(
+	    [{ header: gettext('Node'), dataIndex: 'node', width: 110 }].concat(me.nodeColumns || []));
+	if (me.groupByNode) {
+	    me.features = [{ ftype: 'grouping', groupHeaderTpl: '{name} ({rows.length})' }];
+	}
+	me.dockedItems = [{
+	    xtype: 'component', dock: 'top', itemId: 'nodeStatus', padding: '4 8', hidden: true,
+	}];
+	me.tbar = (me.tbar || []).concat(['->', {
+	    text: gettext('Reload'),
+	    iconCls: 'fa fa-refresh',
+	    handler: () => me.reload(),
+	}]);
+	me.callParent();
+	me.on('activate', () => me.reload());
+    },
+
+    reload: function() {
+	let me = this;
+	PVE.san.Utils.fromEveryNode(me.sanPath, me, function(results, missing) {
+	    let rows = [];
+	    results.forEach(function(r) {
+		let list = me.extract ? me.extract(r.data) : r.data;
+		(list || []).forEach(row => rows.push(Ext.apply({}, row, { node: r.node })));
+	    });
+	    me.store.loadData(rows);
+	    PVE.san.Utils.showMissing(me, missing);
+	});
+    },
+});
+
+// LUNs as the cluster sees them: one row per LUN, one column per node with
+// its active / total paths there. A LUN a node does not see stands out.
+Ext.define('PVE.san.ClusterLunGrid', {
+    extend: 'Ext.grid.Panel',
+    alias: 'widget.pveSanClusterLunGrid',
+
+    title: gettext('LUNs'),
+    stateful: true,
+    stateId: 'grid-pvesan-dc-luns',
+    emptyText: gettext('No LUNs'),
+
+    baseColumns: [
+	{ header: gettext('Name'), dataIndex: 'name', width: 160 },
+	{ header: 'WWID', dataIndex: 'wwid', flex: 1 },
+	{ header: gettext('Vendor'), dataIndex: 'vendor', width: 90, hidden: true },
+	{ header: gettext('Model'), dataIndex: 'model', width: 110 },
+	{ header: gettext('Size'), dataIndex: 'size', width: 90, renderer: Proxmox.Utils.render_size },
+	{ header: gettext('Usage'), dataIndex: 'usage', width: 140 },
+	{
+	    header: gettext('Seen by'),
+	    dataIndex: 'seen',
+	    width: 90,
+	    renderer: function(v, m, rec) {
+		let seen = Number(rec.data.seen) || 0;
+		let total = Number(rec.data.nodes_total) || 0;
+		let cls = seen < total ? 'fa-exclamation-triangle warning' : 'fa-check good';
+		return `<i class="fa ${cls}"></i> ${seen} / ${total}`;
+	    },
+	},
+    ],
+
+    initComponent: function() {
+	let me = this;
+	me.store = Ext.create('Ext.data.Store', { fields: ['wwid'], sorters: ['name'] });
+	me.columns = PVE.san.Utils.safeColumns(me.baseColumns);
+	me.dockedItems = [{
+	    xtype: 'component', dock: 'top', itemId: 'nodeStatus', padding: '4 8', hidden: true,
+	}];
+	me.tbar = ['->', { text: gettext('Reload'), iconCls: 'fa fa-refresh', handler: () => me.reload() }];
+	me.callParent();
+	me.on('activate', () => me.reload());
+    },
+
+    reload: function() {
+	let me = this;
+	PVE.san.Utils.fromEveryNode('devices', me, function(results, missing) {
+	    let nodes = results.map(r => r.node).sort();
+	    let luns = PVE.san.Utils.mergeLuns(results);
+	    luns.forEach(l => { l.nodes_total = nodes.length; });
+	    let nodeCols = nodes.map(n => ({
+		header: Ext.htmlEncode(n),
+		width: 95,
+		sortable: false,
+		renderer: (v, m, rec) => PVE.san.Utils.renderNodePaths((rec.data.per_node || {})[n]),
+	    }));
+	    me.reconfigure(me.store, PVE.san.Utils.safeColumns(me.baseColumns.concat(nodeCols)));
+	    me.store.loadData(luns);
+	    PVE.san.Utils.showMissing(me, missing);
+	});
+    },
+});
+
+// Under Datacenter > Storage: the cluster-wide tabs (they act through the
+// node this GUI is served from) and the per-node tabs for all nodes at once.
+Ext.define('PVE.san.DcPanel', {
+    extend: 'Ext.tab.Panel',
+    alias: 'widget.pveSanDcPanel',
+
+    initComponent: function() {
+	let me = this;
+	let nodename = me.nodename || Proxmox.NodeName;
+	let proto = cls => Ext.ClassManager.get(cls).prototype;
+	me.items = [
+	    { xtype: 'pveSanDatastoreGrid', nodename },
+	    { xtype: 'pveSanSnapshotGrid', nodename },
+	    { xtype: 'pveSanReplicationPanel', nodename },
+	    { xtype: 'pveSanArrayGrid', nodename },
+	    { xtype: 'pveSanFabricGrid', nodename },
+	    { xtype: 'pveSanClusterLunGrid' },
+	    {
+		xtype: 'pveSanClusterGrid',
+		title: gettext('Paths'),
+		sanPath: 'paths',
+		stateId: 'grid-pvesan-dc-paths',
+		sanSorters: ['device', 'hctl'],
+		groupByNode: true,
+		nodeColumns: proto('PVE.san.PathGrid').columns,
+	    },
+	    {
+		xtype: 'pveSanClusterGrid',
+		title: gettext('Adapters'),
+		sanPath: 'adapters',
+		stateId: 'grid-pvesan-dc-adapters',
+		sanSorters: ['name'],
+		nodeColumns: proto('PVE.san.AdapterGrid').columns,
+		tbar: [{
+		    text: gettext('Rescan all nodes'),
+		    iconCls: 'fa fa-sitemap',
+		    handler: function() {
+			let grid = this.up('grid');
+			PVE.san.Utils.runTask({ url: `/nodes/${nodename}/san/rescan-all`, done: () => grid.reload() });
+		    },
+		}],
+	    },
+	    {
+		xtype: 'pveSanClusterGrid',
+		title: gettext('Performance'),
+		sanPath: 'iostats',
+		stateId: 'grid-pvesan-dc-iostats',
+		sanSorters: ['name'],
+		nodeColumns: proto('PVE.san.IOStatsGrid').columns,
+		listeners: {
+		    // each node measures over 2 s; refresh while the tab is shown
+		    activate: function(grid) { grid.timer = setInterval(() => grid.reload(), 15000); },
+		    deactivate: grid => clearInterval(grid.timer),
+		    destroy: grid => clearInterval(grid.timer),
+		},
+	    },
+	    {
+		xtype: 'pveSanClusterGrid',
+		title: gettext('Health'),
+		sanPath: 'path-health',
+		stateId: 'grid-pvesan-dc-health',
+		extract: data => ((data || {}).problems || []).map(text => ({ text })),
+		nodeColumns: [{ header: gettext('Problem'), dataIndex: 'text', flex: 1 }],
+		emptyText: gettext('All datastore LUNs have all their paths on every node.'),
+	    },
+	];
+	me.callParent();
+    },
+});
+
+// Node > Disks: what only this node can tell (its LUNs, paths, adapters).
+// The cluster-wide tabs live under Datacenter > Storage.
 Ext.define('PVE.san.Panel', {
     extend: 'Ext.tab.Panel',
     alias: 'widget.pveSanPanel',
@@ -2433,11 +2704,6 @@ Ext.define('PVE.san.Panel', {
 	let me = this;
 	let nodename = me.nodename || me.pveSelNode.data.node;
 	me.items = [
-	    { xtype: 'pveSanDatastoreGrid', nodename },
-	    { xtype: 'pveSanSnapshotGrid', nodename },
-	    { xtype: 'pveSanReplicationPanel', nodename },
-	    { xtype: 'pveSanArrayGrid', nodename },
-	    { xtype: 'pveSanFabricGrid', nodename },
 	    { xtype: 'pveSanDeviceGrid', nodename },
 	    { xtype: 'pveSanPathGrid', nodename },
 	    { xtype: 'pveSanAdapterGrid', nodename },
@@ -2448,8 +2714,9 @@ Ext.define('PVE.san.Panel', {
     },
 });
 
-// Add the panel to the node's Disks group. PVE.node.Config fills me.items
-// and then calls PVE.panel.Config.initComponent, which builds the menu, so
+// Add the datacenter panel below Datacenter > Storage and the node panel to
+// the node's Disks group. PVE.dc.Config and PVE.node.Config fill me.items
+// and then call PVE.panel.Config.initComponent, which builds the menu, so
 // hooking the parent class lets us append before the menu is built.
 // This override runs for every config panel in the GUI, so anything that
 // goes wrong here only drops the SAN panel and never the panel itself.
@@ -2459,6 +2726,21 @@ Ext.define('PVE.san.NodeConfigHook', {
     initComponent: function() {
 	let me = this;
 	try {
+	    if (me.$className === 'PVE.dc.Config' && Ext.isArray(me.items) &&
+		Ext.ClassManager.getByAlias('widget.pveSanDcPanel')) {
+		// right below Datacenter > Storage, as its sub-entry
+		let caps = Ext.state.Manager.get('GuiCap');
+		let idx = me.items.findIndex(item => item.itemId === 'storage');
+		if (caps && caps.nodes['Sys.Audit'] && idx >= 0) {
+		    me.items.splice(idx + 1, 0, {
+			xtype: 'pveSanDcPanel',
+			title: gettext('SAN / Fibre Channel'),
+			itemId: 'pvesan',
+			iconCls: 'fa fa-sitemap',
+			groups: ['storage'],
+		    });
+		}
+	    }
 	    if (me.$className === 'PVE.node.Config' && Ext.isArray(me.items) &&
 		Ext.ClassManager.getByAlias('widget.pveSanPanel')) {
 		let caps = Ext.state.Manager.get('GuiCap');

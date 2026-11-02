@@ -11,7 +11,7 @@ With an array driver it goes one step further, like the Pure Storage or
 INFINIDAT vSphere plugins: **one form creates the volume on the array, maps it
 to the cluster, rescans every node and builds the datastore.**
 
-> **Status: beta.** Everything below is implemented and covered by 1348
+> **Status: beta.** Everything below is implemented and covered by 1371
 > automated tests, and the plugin runs on a 6-node Proxmox VE 9.2 lab with
 > QLogic and Emulex HBAs. **No array driver has yet been exercised against a
 > real array.** Try each new array type with a small test datastore first, and
@@ -103,7 +103,7 @@ apt install pve-fcsan
 pvesan adapters
 ```
 
-Then reload the web GUI (Ctrl+F5) and open **Node → Disks → SAN / Fibre Channel**.
+Then reload the web GUI (Ctrl+F5) and open **Datacenter → Storage → SAN / Fibre Channel** for the whole cluster, or **Node → Disks → SAN / Fibre Channel** for one node's LUNs, paths and adapters.
 New versions arrive with `apt update && apt upgrade`, like Proxmox VE's own
 updates.
 

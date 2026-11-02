@@ -4,7 +4,7 @@ Version 1.7.1
 
 ## Purpose and scope
 
-`pvesan` (Debian package `pve-fcsan`) gives Proxmox VE the SAN storage workflow vCenter has: list HBAs, rescan, manage LUNs and paths, and create, grow, rename, mount, unmount, reclaim and delete shared datastores on Fibre Channel LUNs. With an array driver it also creates and maps the volume on the array. You can use it from the web GUI (**Node → Disks → SAN / Fibre Channel**), from the `pvesan` CLI, or through the REST API under `/nodes/{node}/san`.
+`pvesan` (Debian package `pve-fcsan`) gives Proxmox VE the SAN storage workflow vCenter has: list HBAs, rescan, manage LUNs and paths, and create, grow, rename, mount, unmount, reclaim and delete shared datastores on Fibre Channel LUNs. With an array driver it also creates and maps the volume on the array. You can use it from the web GUI (**Datacenter → Storage → SAN / Fibre Channel**, and per node under **Node → Disks**), from the `pvesan` CLI, or through the REST API under `/nodes/{node}/san`.
 
 A pvesan *datastore* is a shared thick LVM volume group on one or more multipathed LUNs. It is registered in `/etc/pve/storage.cfg` as storage type `fcsan`, a subclass of Proxmox's built-in LVM plugin, so live migration and HA work the same way they do on shared LVM. iSCSI LUNs also show up in the device lists and work the same way, but FC is the main target.
 
@@ -117,7 +117,9 @@ apt install ./pve-fcsan_1.7.1_all.deb
 pvesan adapters
 ```
 
-The status command should report both `Nodes.pm` and `index.html.tpl` as `integrated`. Reload the browser with Ctrl+F5, then open **Node → Disks → SAN / Fibre Channel**.
+The status command should report both `Nodes.pm` and `index.html.tpl` as `integrated`. Reload the browser with Ctrl+F5, then open **Datacenter → Storage → SAN / Fibre Channel**.
+
+**Where things are in the GUI.** **Datacenter → Storage → SAN / Fibre Channel** holds everything that is cluster-wide (Datastores, Snapshots, Disaster recovery, Arrays, Fabrics) and the per-node information for all nodes at once: **LUNs** (one row per LUN, a column per node with its active / total paths, so a LUN a node does not see stands out), **Paths**, **Adapters**, **Performance** and **Health**, each with a Node column. A node that is offline or does not answer is named above the table. Actions there run on the node your browser is connected to, which drives the other nodes. **Node → Disks → SAN / Fibre Channel** keeps that node's own Devices, Paths, Adapters, Performance and Health tabs, with the node-local actions (rescan, multipath settings, claim and detach).
 
 Installing does four things:
 
