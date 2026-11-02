@@ -27,6 +27,27 @@ reproduce.
 - All cluster-wide actions need `Sys.Modify` on `/` and `Datastore.Allocate`
   on `/storage`.
 
+## Verifying a download
+
+Each release has a `SHA256SUMS` file and a build-provenance attestation
+signed by GitHub Actions, which ties the `.deb` to the commit and workflow
+run that built it:
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing
+gh attestation verify pve-fcsan_X.Y.Z_all.deb --repo warddynamiccomputing/pve-fcsan
+```
+
+The apt repository is signed; apt checks every package against it.
+
+## How releases are built
+
+- CI runs with a read-only token. Only the job that publishes a tagged
+  release can write to it, and it runs no code from pull requests.
+- Every GitHub Action is pinned to a full commit SHA; Dependabot proposes
+  updates, and `make lint` fails on an unpinned one.
+- `make lint` also runs shellcheck and perlcritic.
+
 ## Supported versions
 
 Only the latest release receives fixes.

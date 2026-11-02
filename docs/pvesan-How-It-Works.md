@@ -370,7 +370,7 @@ The view is cached in `monitor.json` with its time; the API serves the cache whe
 | `t/80-integrate.t` | `pvesan-integrate` against a fake pve-manager tree: insertion point, upgrade from an older line, refusal without the anchor, exact removal, and that the patched `Nodes.pm` still loads with a broken pve-fcsan |
 | `t/90-compile.t` | Loads every module; fails on compile warnings. Uses the real Proxmox VE libraries when present, stubs otherwise |
 
-The build also checks that every Proxmox function the code calls exists in the installed libraries, that the REST router accepts every API path, that `pvesan.js` parses, and that every module is in the package. CI runs the tests on every push.
+The build also checks that every Proxmox function the code calls exists in the installed libraries, that the REST router accepts every API path, that `pvesan.js` parses, and that every module is in the package. CI runs the tests and `make lint` (shellcheck, perlcritic, and a check that every GitHub Action is pinned to a commit SHA) on every push and pull request.
 
 **Validation so far.** The plugin runs on a 6-node Proxmox VE 9.2 cluster with QLogic and Emulex HBAs: install, integration, services, storage plugin, API, CLI, GUI asset, local and cluster rescan, refusal of invisible LUNs and CLI exit codes are verified there, and every array driver's first call was checked over pinned TLS. That lab work found and fixed seven bugs that unit tests could not see (an API path clash, a non-existent helper call, arguments lost in the cluster fan-out, a packaging omission, among others). Array drivers have not yet run against real arrays.
 
@@ -379,7 +379,7 @@ The build also checks that every Proxmox function the code calls exists in the i
 1. Update `debian/changelog` and `CHANGELOG.md`.
 2. `make test` and `make deb` on a clean Debian 12/13 host (CI does this on every tag).
 3. Run the cluster acceptance checklist below on a lab cluster.
-4. Tag `vX.Y.Z`; CI attaches the `.deb` to the GitHub release and rebuilds the signed apt repository on GitHub Pages from every release's `.deb` (`tools/build-apt-repo.sh`, key in the `APT_SIGNING_KEY` secret).
+4. Tag `vX.Y.Z`; CI attaches the `.deb`, a `SHA256SUMS` file and a signed build-provenance attestation to the GitHub release, and rebuilds the signed apt repository on GitHub Pages from every release's `.deb` (`tools/build-apt-repo.sh`, key in the `APT_SIGNING_KEY` secret).
 5. Roll out node by node, checking `pvesan-integrate status` after each.
 
 **Cluster acceptance checklist**

@@ -7,8 +7,11 @@ on:
   pull_request:
   workflow_dispatch:   # rebuild the apt repository from the existing releases
 
+# Read-only by default; only the release and apt-repo jobs get more.
+# Actions are pinned to commit SHAs (the tag is in the comment); Dependabot
+# proposes updates.
 permissions:
-  contents: write   # needed to attach the .deb to a release
+  contents: read
 
 jobs:
   build:
@@ -18,9 +21,11 @@ jobs:
       - name: Install build tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends build-essential debhelper perl nodejs git ca-certificates libwww-perl liblwp-protocol-https-perl libio-socket-ssl-perl libnet-ssleay-perl
+          apt-get install -y --no-install-recommends build-essential debhelper perl nodejs git ca-certificates libwww-perl liblwp-protocol-https-perl libio-socket-ssl-perl libnet-ssleay-perl shellcheck libperl-critic-perl
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Unit tests (PVE modules stubbed)
         run: make test
@@ -28,27 +33,56 @@ jobs:
       - name: GUI syntax check
         run: node --check www/pvesan.js
 
+      - name: Lint (shellcheck, perlcritic)
+        run: make lint
+
       - name: Build package
         run: |
           make deb
           mkdir -p dist
           mv ../pve-fcsan_*_all.deb dist/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pve-fcsan-deb
           path: dist/*.deb
 
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+  # Tags only: checksums, build provenance, and the files on the release.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # attach files to the release
+      id-token: write       # sign the provenance attestation
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          files: dist/*.deb
+          name: pve-fcsan-deb
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.deb > SHA256SUMS && cat SHA256SUMS
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.deb
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: |
+            dist/*.deb
+            dist/SHA256SUMS
 
   # apt repository on GitHub Pages, built from every release's .deb
   apt-repo:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: [build, release]
+    if: >-
+      always() && needs.build.result == 'success' &&
+      (needs.release.result == 'success' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -58,7 +92,9 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends apt-utils gnupg
@@ -74,16 +110,17 @@ jobs:
           ls -l site/pool/main
 
       - id: pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
 
       - name: Build and sign the repository
         env:
           APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
-        run: sh tools/build-apt-repo.sh site "${{ steps.pages.outputs.base_url }}"
+          BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: sh tools/build-apt-repo.sh site "$BASE_URL"
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:
           path: site
 
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
