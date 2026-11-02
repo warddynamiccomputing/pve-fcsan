@@ -51,9 +51,9 @@ SKIP: {
 # A real TLS handshake: the server's certificate is signed by a CA the client
 # trusts, so only the pin can refuse it.
 SKIP: {
-    skip 'IO::Socket::SSL::Utils not installed', 3
+    skip 'IO::Socket::SSL::Utils not installed', 2
         if !eval { require IO::Socket::SSL; require IO::Socket::SSL::Utils; require Net::SSLeay; 1 };
-    skip 'no fork', 3 if $^O eq 'MSWin32';
+    skip 'no fork', 2 if $^O eq 'MSWin32';
     IO::Socket::SSL::Utils->import(qw(CERT_create));
     my ($ca, $cakey) = CERT_create(CA => 1, subject => { CN => 'test CA' });
     my ($cert, $key) = CERT_create(issuer => [ $ca, $cakey ], subject => { CN => 'array.test' }, purpose => 'server');
@@ -87,8 +87,12 @@ SKIP: {
         SSL_verifycn_scheme => 'none' }), 1, 'pinned certificate: handshake succeeds');
     is($connect->({ SSL_verify_mode => 1, SSL_verify_callback => $B->can('pin_verifier')->($FP),
         SSL_verifycn_scheme => 'none' }), 0, 'CA-signed but not the pinned certificate: refused');
-    is($connect->({ SSL_verify_mode => 1, SSL_fingerprint => $FP, SSL_verifycn_scheme => 'none' }), 1,
-        'for reference: SSL_fingerprint alone lets the CA-signed certificate through');
+    # For reference only, not a test (it depends on the IO::Socket::SSL
+    # version): older versions let a CA-signed certificate through when only
+    # SSL_fingerprint is set, which is why pvesan checks the pin itself.
+    diag('IO::Socket::SSL ' . IO::Socket::SSL->VERSION . ': SSL_fingerprint alone '
+        . ($connect->({ SSL_verify_mode => 1, SSL_fingerprint => $FP, SSL_verifycn_scheme => 'none' })
+            ? 'accepts' : 'refuses') . ' a CA-signed certificate that is not pinned');
     kill('TERM', $pid);
     waitpid($pid, 0);
 }
