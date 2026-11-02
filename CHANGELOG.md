@@ -3,7 +3,7 @@
 The Debian changelog (`debian/changelog`) is the authoritative history; this is
 the readable summary.
 
-## Unreleased
+## 1.8.0
 - GUI: new **Datacenter → Storage → SAN / Fibre Channel** entry with the
   cluster-wide tabs (Datastores, Snapshots, Disaster recovery, Arrays,
   Fabrics) and all nodes at once: LUNs with a column per node showing its
